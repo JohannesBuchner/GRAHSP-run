@@ -17,6 +17,7 @@ from scipy.constants import c
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import tqdm
+import os
 
 gbl_warehouse = SedWarehouse()
 
@@ -27,8 +28,9 @@ column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
 parameter_list = config.configuration['creation_modules_params']
 cache_depth = module_list.index('extinction')
-cache_max = 10000
-
+cache_depth = module_list.index('activate')
+cache_max = int(os.environ.get('CACHE_MAX', '10000'))
+cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
 analysis_module = get_analysis_module(config.configuration[
     'analysis_method'])
 analysis_module_params = config.configuration['analysis_method_params']
@@ -68,7 +70,7 @@ for module_name, module_parameters in zip(module_list, parameter_list):
             else:
                 is_log_param.append(False)
                 param_names.append("%s.%s" % (module_name, k))
-            print("    %20s : %s" % (k, v))
+            print("    %20s : %s" % (k, v), '(log-uniform)' if is_log_param[-1] else '(uniform)')
         else:
             print("    %20s = %s" % (k, v[0]))
         del k, v
@@ -121,7 +123,7 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
         for k in sorted(module_parameters_available.keys()):
             selected_value = module_parameters_selected[k]
             mock_value = module_parameters_available[k][0]
-            if k in ('redshift', 'AGNtype', 'E(B-V)'):
+            if k in ('redshift', 'AGNtype', 'E(B-V)', 'E(B-V)-AGN'):
                 parameter_list_gal_here[k] = selected_value
                 parameter_list_agn_here[k] = selected_value
             elif 'activate' in module_name or 'AGN' in k:
@@ -134,10 +136,9 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
         parameter_list_agn.append(parameter_list_agn_here)
 
     if len(gbl_warehouse.storage.dictionary) > cache_max:
-        print("clearing cache:", len(gbl_warehouse.storage.dictionary))
+        if cache_print: print("clearing cache:", len(gbl_warehouse.storage.dictionary))
         gbl_warehouse.partial_clear_cache(cache_depth)
-        print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
-
+        if cache_print: print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
     sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_gal[:cache_depth])
     agn_sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_agn[:cache_depth])
     assert sed.contribution_names == agn_sed.contribution_names, (sed.contribution_names, agn_sed.contribution_names)
@@ -409,8 +410,133 @@ def plot_results(sampler, obs, obs_fluxes, obs_errors, wobs, cache_filters):
         figure.savefig("%s/sed_%s.pdf" % (plot_dir, sed_type))
         plt.close(figure)
 
+def make_prior_transform(rv_redshift):
+    def prior_transform(cube):
+        params = cube.copy()
+        i = 0
+        for module_parameters in parameter_list:
+            for k, v in module_parameters.items():
+                if len(v) > 1:
+                    params[i] = v[int(len(v) * cube[i])]
+                    if is_log_param[i]:
+                        params[i] = log10(params[i])
+                    i += 1
+        
+        # stellar mass from 10^5 to 10^15
+        params[i] = cube[i] * 10 + 5
+        
+        # AGN luminosity from 10^38 to 10^50
+        params[i+1] = cube[i+1] * 20 + 30
 
-def main():
+        # redshift. 
+        # params[i+1] = rv_redshift.ppf(cube[i+1])
+        # Approximate redshift with points on the CDF
+        params[i+2] = rv_redshift.ppf((1 + np.round(cube[i+2] * 40)) / 42)
+        
+        # systematic uncertainty
+        # params[i+3] = rv_systematics.ppf(cube[i+3])
+        return params
+    return prior_transform
+
+def plot_model():
+    umid = np.zeros(len(param_names)) + 0.5
+    for redshift in [0, 0.5, 1, 3]:
+        for logL_AGN in [38, 42, 44, 46]:
+            L_AGN = 10**logL_AGN
+            rv_redshift = scipy.stats.uniform(redshift, redshift+1e-3)
+            prior_transform = make_prior_transform(rv_redshift)
+            print("reference values:")
+            for p, v in zip(param_names, prior_transform(umid)):
+                print("   %-20s: %s" % (p, v))
+            cache_filters = {}
+            
+            for i, p in enumerate(param_names):
+                if p in ('redshift', 'log(L_AGN)', 'activate.AGNtype'):
+                    continue
+                print("varying", p)
+
+                u = umid.copy()
+                for AGNtype in 1, 2:
+                    last_value = np.nan
+                    for v in np.linspace(0, 0.999, 11):
+                        u[i] = v
+                        parameters = prior_transform(u)
+                        parameters[param_names.index('activate.AGNtype')] = AGNtype
+                        if parameters[i] == last_value:
+                            continue
+                        last_value = parameters[i]
+                        stellar_mass = 10**parameters[-3]
+                            
+                        parameter_list_here = make_parameter_list(parameters)
+                        assert module_list[-1] == 'redshifting'
+                        parameter_list_here[-1] = dict(redshift=redshift)
+                        
+                        with np.errstate(invalid='ignore'):
+                            sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+                        sed.cache_filters = cache_filters
+                        
+                        wavelength_spec = sed.wavelength_grid
+                        DL = sed.info['universe.luminosity_distance']
+                        sed_multiplier = (wavelength_spec * 1e29 /
+                                           (c / (wavelength_spec * 1e-9)) /
+                                           (4. * np.pi * DL * DL))
+
+                        assert (sed_multiplier >= 0).all(), (stellar_mass, DL, wavelength_spec)
+                        wavelength_spec /= 1000
+                        mask = np.logical_and(wavelength_spec >= PLOT_L_MIN, wavelength_spec <= PLOT_L_MAX)
+
+                        if AGNtype == 1:
+                            plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], 
+                                color=plt.cm.viridis(v), label=parameters[i], ls='-')
+                        else:
+                            plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], 
+                                color=plt.cm.viridis(v), ls='--')
+                
+                plt.xlabel("Observed wavelength [$\mu$m]")
+                plt.ylabel("Flux [mJy]")
+                plt.xscale('log')
+                plt.yscale('log')
+                plt.legend(title=p, fontsize=6, loc='best', fancybox=True, framealpha=0.5)
+                plt.xlim(PLOT_L_MIN, PLOT_L_MAX)
+                plt.ylim(1e13, None)
+                #plt.setp(plt.gca().get_xticklabels(), visible=False)
+                #plt.setp(plt.gca().get_yticklabels()[1], visible=False)
+                
+                filename = 'modelspectrum_z%.1f_L%d_%s.png' % (redshift, logL_AGN, p.replace('(','').replace(')',''))
+                plt.savefig(filename, bbox_inches='tight')
+                plt.close()
+#            break
+#       break
+        
+
+def generate_fluxes():
+    rv_redshift = scipy.stats.uniform(0, 6)
+    prior_transform = make_prior_transform(rv_redshift)
+    cache_filters = {}
+
+    Ngen = 100000
+    fluxdata = np.empty((Ngen, len(param_names) + len(filters)))
+    u = np.random.uniform(size=len(param_names))
+    for i in tqdm.trange(Ngen):
+        u[np.random.randint(len(param_names))] = np.random.uniform()
+        parameters = prior_transform(u)
+        stellar_mass = 10**parameters[-3]
+        L_AGN = 10**parameters[-2]
+        redshift = parameters[-1]
+        parameter_list_here = make_parameter_list(parameters)
+        assert module_list[-1] == 'redshifting'
+        parameter_list_here[-1] = dict(redshift=redshift)
+        
+        sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+        sed.cache_filters = cache_filters
+
+        model_fluxes_full, model_variables = get_model_fluxes(sed)
+        fluxdata[i][:len(param_names)] = parameters
+        fluxdata[i][len(param_names):] = model_fluxes_full
+
+    np.savetxt("model_fluxes.txt.gz", fluxdata, header=','.join(param_names + filters), delimiter=',', comments='')
+
+def main(sampler='nested'):
     # Read the observation table and complete it by adding error where
     # none is provided and by adding the systematic deviation.
     obs_table = complete_obs_table(read_table(data_file), column_list,
@@ -433,33 +559,7 @@ def main():
         print("redshift:", redshift_shape, redshift_scale)
         rv_redshift = scipy.stats.weibull_min(redshift_shape, scale=redshift_scale)
 
-        def prior_transform(cube):
-            params = cube.copy()
-            i = 0
-            for module_parameters in parameter_list:
-                for k, v in module_parameters.items():
-                    if len(v) > 1:
-                        params[i] = v[int(len(v) * cube[i])]
-                        if is_log_param[i]:
-                            params[i] = log10(params[i])
-                        i += 1
-            
-            # stellar mass from 10^5 to 10^15
-            params[i] = cube[i] * 10 + 5
-            
-            # AGN luminosity from 10^38 to 10^50
-            params[i+1] = cube[i+1] * 20 + 30
-
-            # redshift. 
-            # params[i+1] = rv_redshift.ppf(cube[i+1])
-            # Approximate redshift with points on the CDF
-            params[i+2] = rv_redshift.ppf((1 + np.round(cube[i+2] * 40)) / 42)
-            
-            # systematic uncertainty
-            # params[i+3] = rv_systematics.ppf(cube[i+3])
-            return params
-
-        
+        prior_transform = make_prior_transform(rv_redshift)
         # select the filters from the list of active filters
 
         obs_fluxes_full = np.array([obs[name] for name in filters])
@@ -469,17 +569,8 @@ def main():
         obs_fluxes = obs_fluxes_full[wobs]
         obs_errors = obs_errors_full[wobs]
 
-        # Some observations may not have flux values in some filter(s), but
-        # they can have upper limit(s). To process upper limits, the user
-        # is asked to put the upper limit as flux value and an error value with
-        # (obs_errors>=-9990. and obs_errors<0.).
-        # Next, the user has two options:
-        # 1) s/he puts True in the boolean lim_flag
-        # and the limits are processed as upper limits below.
-        # 2) s/he puts False in the boolean lim_flag
-        # and the limits are processed as no-data below.
         cache_filters = {}
-
+        
         def loglikelihood(parameters):
             stellar_mass = 10**parameters[-3]
             L_AGN = 10**parameters[-2]
@@ -494,6 +585,16 @@ def main():
             model_fluxes_full, model_variables = get_model_fluxes(sed)
 
             model_fluxes = model_fluxes_full[wobs]
+            
+            # Some observations may not have flux values in some filter(s), but
+            # they can have upper limit(s). To process upper limits, the user
+            # is asked to put the upper limit as flux value and an error value with
+            # (obs_errors>=-9990. and obs_errors<0.).
+            # Next, the user has two options:
+            # 1) s/he puts True in the boolean lim_flag
+            # and the limits are processed as upper limits below.
+            # 2) s/he puts False in the boolean lim_flag
+            # and the limits are processed as no-data below.
 
             # χ² of the comparison of each model to each observation.
             # This mask selects the filter(s) for which measured fluxes are given
@@ -517,18 +618,34 @@ def main():
             #print("chi2:", chi2_, parameters)
             return -0.5 * chi2_
 
-        sampler = ReactiveNestedSampler(
-            param_names, loglikelihood, prior_transform,
-            log_dir="dualanalysis_%s_chi2" % obs['id'], resume=True)
-        sampler.run(frac_remain=0.5, max_num_improvement_loops=0)
-        sampler.print_results()
-        try:
-            sampler.plot()
-        except Exception:
-            pass
-        plot_results(sampler, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+        if sampler == 'laplace':
+            from snowline import ReactiveImportanceSampler
+            sampler = ReactiveImportanceSampler(param_names, loglikelihood, prior_transform)
+            sampler.run(num_global_samples=1000, max_improvement_loops=1)
+        if sampler == 'mcmc':
+            from autoemcee import ReactiveAffineInvariantSampler
+            sampler = ReactiveAffineInvariantSampler(param_names, loglikelihood, prior_transform)
+            sampler.run()
+            sampler.print_results()
+        elif sampler == 'nested':
+            sampler = ReactiveNestedSampler(
+                param_names, loglikelihood, prior_transform,
+                log_dir="dualanalysis_%s_chi2" % obs['id'], resume=True)
+            sampler.run(frac_remain=0.5, max_num_improvement_loops=0)
+            sampler.print_results()
+            try:
+                sampler.plot()
+            except Exception:
+                pass
+            plot_results(sampler, obs, obs_fluxes, obs_errors, wobs, cache_filters)
         
         
 
 if __name__ == '__main__':
-    main()
+    import sys
+    if sys.argv[1] == 'generate-from-prior':
+        generate_fluxes()
+    elif sys.argv[1] == 'plot-model':
+        plot_model()
+    else:
+        main(sys.argv[1])
