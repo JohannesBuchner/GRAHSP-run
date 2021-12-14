@@ -80,8 +80,8 @@ print()
 param_names.append("log(stellar_mass)")
 param_names.append("log(L_AGN)")
 param_names.append("redshift")
-#param_names.append("systematics")
-#rv_systematics = scipy.stats.halfnorm(scale=0.05)
+param_names.append("systematics")
+rv_systematics = scipy.stats.halfnorm(scale=0.05)
 
 def make_parameter_list(parameters):
     parameter_list_first = []
@@ -434,7 +434,7 @@ def make_prior_transform(rv_redshift):
         params[i+2] = rv_redshift.ppf((1 + np.round(cube[i+2] * 40)) / 42)
         
         # systematic uncertainty
-        # params[i+3] = rv_systematics.ppf(cube[i+3])
+        params[i+3] = rv_systematics.ppf(cube[i+3])
         return params
     return prior_transform
 
@@ -520,9 +520,9 @@ def generate_fluxes():
     for i in tqdm.trange(Ngen):
         u[np.random.randint(len(param_names))] = np.random.uniform()
         parameters = prior_transform(u)
-        stellar_mass = 10**parameters[-3]
-        L_AGN = 10**parameters[-2]
-        redshift = parameters[-1]
+        stellar_mass = 10**parameters[-4]
+        L_AGN = 10**parameters[-3]
+        redshift = parameters[-2]
         parameter_list_here = make_parameter_list(parameters)
         assert module_list[-1] == 'redshifting'
         parameter_list_here[-1] = dict(redshift=redshift)
@@ -572,9 +572,10 @@ def main(sampler='nested'):
         cache_filters = {}
         
         def loglikelihood(parameters):
-            stellar_mass = 10**parameters[-3]
-            L_AGN = 10**parameters[-2]
-            redshift = parameters[-1]
+            stellar_mass = 10**parameters[-4]
+            L_AGN = 10**parameters[-3]
+            redshift = parameters[-2]
+            sys_error = parameters[-1]
             parameter_list_here = make_parameter_list(parameters)
             assert module_list[-1] == 'redshifting'
             parameter_list_here[-1] = dict(redshift=redshift)
@@ -605,9 +606,10 @@ def main(sampler='nested'):
             # i.e., when (obs_flux is >=0. (and obs_errors>=-9990., obs_errors<0.))
             # and lim_flag=True
             mask_lim = np.logical_and(obs_errors >= -9990., obs_errors < TOLERANCE)
-            chi2_ = np.sum(np.square(
-                (obs_fluxes[mask_data]-model_fluxes[mask_data]) /
-                (obs_errors[mask_data])))
+            total_variance = obs_errors[mask_data]**2 + sys_error**2
+            chi2_ = np.sum(
+                (obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)
+            norm = 0.5 * np.log(2 * np.pi * total_variance).sum()
 
             if mask_lim.any():
                 chi2_ += -2. * log(
@@ -616,7 +618,7 @@ def main(sampler='nested'):
                                 (obs_fluxes[mask_lim]-model_fluxes[mask_lim]) /
                                 (np.sqrt(2)*(-obs_errors[mask_lim]))))).sum()
             #print("chi2:", chi2_, parameters)
-            return -0.5 * chi2_
+            return -0.5 * chi2_ - norm
 
         if sampler == 'laplace':
             from snowline import ReactiveImportanceSampler
