@@ -36,14 +36,43 @@ import argparse
 import numpy as np
 from numpy import log, log10
 from math import erf
+
 import scipy.stats
 from scipy.constants import c
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+
 from ultranest import ReactiveNestedSampler
 from ultranest.plot import PredictionBand
 import tqdm
 import joblib
+import corner
+
+
+class DeltaDist(object):
+    """Dirac Delta distribution."""
+    def __init__(self, value):
+        self.value = value
+    def ppf(self, u):
+        return self.value
+    def mean(self):
+        return self.value
+    def std(self):
+        return 0
+
+
+class FastExtinction(object):
+    """Context within which the extinction law reduces computation.
+
+    Per-filter extinctions, and per-component extinction are skipped.
+    """
+    def __enter__(self):
+        ExtinctionLaw.store_filter_attenuation = False
+        ExtinctionLaw.store_component_attenuation = False
+    def __exit__(self, type, value, traceback):
+        ExtinctionLaw.store_filter_attenuation = True
+        ExtinctionLaw.store_component_attenuation = True
+
 
 class HelpfulParser(argparse.ArgumentParser):
 	def error(self, message):
@@ -67,6 +96,8 @@ parser.add_argument('--cores', type=int, default=-1,
 
 parser.add_argument('--plot', action='store_true',
 	help='also make plots of the SED and parameter constraints')
+parser.add_argument('--mass-max', type=float, default=15,
+	help='Maximum stellar mass.')
 parser.add_argument('--randomize', action='store_true',
 	help='Randomize order in which to analyse observations.')
 
@@ -104,6 +135,7 @@ parameter_list = config.configuration['creation_modules_params']
 cache_depth = module_list.index('extinction')
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
+replot = os.environ.get('REPLOT', '0') == '1'
 if cache_print:
     print("Caching modules:", module_list[:cache_depth], "with %d entries" % cache_max)
 analysis_module = get_analysis_module(config.configuration[
@@ -147,7 +179,7 @@ param_names.append("log(stellar_mass)")
 param_names.append("log(L_AGN)")
 param_names.append("redshift")
 param_names.append("systematics")
-rv_systematics = scipy.stats.halfcauchy(scale=0.005)
+rv_systematics = scipy.stats.halfcauchy(scale=0.05)
 
 def make_parameter_list(parameters):
     parameter_list_first = []
@@ -227,10 +259,12 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     # scale the AGN and galactic components as needed
     scaled_sed.luminosities[~agn_mask] *= stellar_mass
     scaled_sed.info.update({k:v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info})
-    # convert from erg/s to W, the luminosity unit of cigale
-    scaled_sed.luminosities[agn_mask] = agn_sed.luminosities[agn_mask] * L_AGN / 1e7
+    # convert from erg/s/A at 5100A to erg/s with 5100
+    # convert from erg/s to W, the luminosity unit of cigale, with 1e7
+    scaled_sed.luminosities[agn_mask] = agn_sed.luminosities[agn_mask] * L_AGN / 1e7 / 5100
     # copy over AGN meta data
     scaled_sed.info.update({k:v * (L_AGN if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
+    scaled_sed.luminosity = scaled_sed.luminosities.sum(0)
 
     # apply the remaining modules
     for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_gal[cache_depth:]):
@@ -244,7 +278,6 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     assert np.isfinite(scaled_sed.luminosities).all(), scaled_sed.luminosities
     
     # update total luminosities
-    scaled_sed.luminosity = scaled_sed.luminosities.sum(0)
     assert np.isfinite(scaled_sed.luminosity).all(), scaled_sed.luminosity
     return scaled_sed, sed, agn_sed
 
@@ -272,14 +305,13 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
     for i, (param_name, samples) in enumerate(zip(param_names, samples.transpose())):
         plt.subplot(4, len(param_names) // 4 + 1, i + 1)
         bins = np.unique(list(set(prior_samples[:,i]).union(set(samples))))
-        if bins.min() * 0.95 < bins.min() and bins.max() * 1.05 > bins.max():
-            bins = np.concatenate(([bins.min() * 0.95], bins, [bins.max() * 1.05]))
+        if len(bins) > 2 and bins[-1] > bins[-2]:
+            bins = np.concatenate((bins, [bins[-1] + bins[-1] - bins[-2]]))
         if len(bins) > 40:
             bins = 20
         with np.errstate(invalid='ignore', divide='ignore'):
             plt.hist(samples, histtype='step', density=True, bins=bins)
         xlo, xhi = plt.xlim()
-        print("  ", param_name, samples.mean(), samples.std())
         with np.errstate(invalid='ignore', divide='ignore'):
             plt.hist(prior_samples[:,i], histtype='step', 
                 density=True, bins=bins, color='gray', ls='-')
@@ -290,8 +322,26 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
     plt.subplots_adjust(wspace=0.1)
     plt.savefig(filename, bbox_inches='tight')
     plt.close()
-    
-def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters):
+
+plot_elements = [
+    dict(keys=with_attenuation(['stellar.young', 'stellar.old']),
+         label="Stellar attenuated", color='orange', marker=None, linestyle='-',),
+    #dict(keys=['stellar.young', 'stellar.old'],
+    #     label="Stellar unattenuated", color='b', marker=None, nonposy='clip', linestyle='--', linewidth=0.5),
+    dict(keys=with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
+         label="Nebular emission", color='y', marker=None, linewidth=.5),
+    dict(keys=with_attenuation(['agn.activate_Disk']),
+         label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
+    dict(keys=with_attenuation(['agn.activate_Torus']),
+         label="AGN torus", color=[0.90, 0.77, 0.42], marker=None, linestyle='-', linewidth=1.5),
+    dict(keys=with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_EmLines_LINER']),
+         label="AGN lines", color=[0.90, 0.50, 0.21], marker=None, linestyle='-', linewidth=0.5),
+    dict(keys=['dust'], label="Dust", color='darkred', marker=None, linestyle='-', linewidth=0.5),
+    #dict(keys=['F_lambda_total'],
+    #     label="Model spectrum", color='k', marker=None, nonposy='clip', linestyle='-', linewidth=1.5, alpha=0.7),
+]
+
+def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot):
     # only allow the main process to plot
     if not sampler.log:
         return
@@ -300,37 +350,32 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     plot_dir = sampler.logs['plots']
     assert np.isfinite(results['samples']).all()
     
-    if all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'sed_mJy', 'sed_lum'))):
+    if not replot and all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'sed_mJy', 'sed_lum'))):
+        print("not replotting.")
         return
     plot_posteriors('%s/posteriors.pdf' % plot_dir, prior_samples, param_names, results['samples'])
+    smooth_samples = sampler.results['samples'].copy()
+    for i in range(len(param_names)):
+        bins = np.unique(prior_samples[:,i]).tolist()
+        if len(bins) < 40:
+            if len(bins) == 1:
+                db = 1
+            else:
+                db = (bins[-1] - bins[-2])
+            for lo, hi in zip(bins, bins[1:] + [bins[-1] + db]):
+                mask = smooth_samples[:,i] == lo
+                smooth_samples[mask,i] = np.random.uniform(lo, hi, size=mask.sum())
+    corner.corner(smooth_samples, labels=param_names, show_titles=True, bins=10)
+    plt.savefig('%s/corner.pdf' % plot_dir)
+    plt.close()
 
     bands = {'lum':{}, 'mJy':{}}
-
-    plot_elements = [
-        dict(keys=with_attenuation(['stellar.young', 'stellar.old']),
-             label="Stellar attenuated", color='orange', marker=None, linestyle='-',),
-        #dict(keys=['stellar.young', 'stellar.old'],
-        #     label="Stellar unattenuated", color='b', marker=None, nonposy='clip', linestyle='--', linewidth=0.5),
-        dict(keys=with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
-             label="Nebular emission", color='y', marker=None, linewidth=.5),
-        dict(keys=with_attenuation(['agn.activate_Disk']),
-             label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
-        dict(keys=with_attenuation(['agn.activate_Torus']),
-             label="AGN torus", color=[0.90, 0.77, 0.42], marker=None, linestyle='-', linewidth=1.5),
-        dict(keys=with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_EmLines_LINER']),
-             label="AGN lines", color=[0.90, 0.50, 0.21], marker=None, linestyle='-', linewidth=0.5),
-        #dict(keys=['F_lambda_total'],
-        #     label="Model spectrum", color='k', marker=None, nonposy='clip', linestyle='-', linewidth=1.5, alpha=0.7),
-    ]
     
     z = obs['redshift']
     # chi2_best = -2 * sampler.results['weighted_samples']['logl'].max()
     # chi2_reduced = chi2_best / wobs.sum()
     chi2_best = 1e300
     
-    ExtinctionLaw.store_filter_attenuation = True
-    ExtinctionLaw.store_component_attenuation = True
-
     posteriors_names = analysed_variables + ['NEV', 'Lbol', 'chi2']
     posteriors = []
     all_mod_fluxes = []
@@ -359,11 +404,11 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         mod_fluxes = model_fluxes_full[wobs]
         all_mod_fluxes.append(mod_fluxes)
 
+        _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, sys_error*0+0.1, NEV)
+        chi2_best = min(chi2_0, chi2_best)
         norm, chi2_ = chi2_with_norm(mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV)
-        chi2_best = min(chi2_, chi2_best)
         posteriors.append(np.concatenate((np.log10(model_variables), [NEV, Lbol, chi2_])))
         
-        # print(dir(sed), sed.info.keys())
         wavelength_spec = sed.wavelength_grid
         DL = sed.info['universe.luminosity_distance']
 
@@ -396,10 +441,12 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
                 bands[sed_type]['total'] = PredictionBand(wavelength_spec2)
             bands[sed_type]['total'].add(sed.luminosity * sed_multiplier)
 
+    print("SED model components:", ' '.join(sed.contribution_names))
+
     print("SED info available:", ' '.join(sed.info.keys()))
     print("selected:", posteriors_names)
     plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, np.array(posteriors))
-
+    
     mod_fluxes = np.median(all_mod_fluxes, axis=0)
 
     for sed_type in 'mJy', 'lum':
@@ -455,7 +502,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         if not mask_uplim.any() == False:
             ax1.errorbar(filters_wl[mask_uplim], obs_fluxes[mask_uplim],
-                         yerr=obs_fluxes_err[mask_uplim]*3, ls='',
+                         yerr=obs_fluxes_err[mask_uplim], ls='',
                          marker='v', label='Observed upper limits',
                          markerfacecolor='None', markersize=6,
                          markeredgecolor='g', 
@@ -471,9 +518,10 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         mask = np.where(obs_fluxes > 0.)
         ax2.errorbar(filters_wl[mask],
                      (obs_fluxes[mask]-mod_fluxes[mask])/obs_fluxes[mask],
-                     yerr=obs_fluxes_err[mask]/obs_fluxes[mask]*3,
+                     yerr=obs_fluxes_err[mask]/obs_fluxes[mask],
                      marker='_', color='k',
                      capsize=2, linestyle=' ', elinewidth=1)
+        maxresid = max(1, max(np.abs((obs_fluxes[mask]-mod_fluxes[mask])/obs_fluxes[mask])))
         ax2.plot([xmin, xmax], [0., 0.], ls='--', color='k')
         ax2.set_xscale('log')
         ax1.set_xscale('log')
@@ -500,7 +548,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             ymin = ymax / 100
         ax1.set_ylim(1e-2*ymin, 1e1*ymax)
         ax1.set_yscale('log')
-        ax2.set_ylim(-1.0, 1.0)
+        ax2.set_ylim(-maxresid, maxresid)
         if sed_type == 'lum':
             ax2.set_xlabel("Rest-frame wavelength [$\mu$m]")
             ax1.set_ylabel("Luminosity [W]")
@@ -510,7 +558,6 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             ax1.set_ylabel("Flux [mJy]")
             ax2.set_ylabel("(Obs-Mod)/Obs")
         ax1.legend(fontsize=6, loc='best', fancybox=True, framealpha=0.5)
-        ax2.legend(fontsize=6, loc='best', fancybox=True, framealpha=0.5)
         plt.setp(ax1.get_xticklabels(), visible=False)
         plt.setp(ax1.get_yticklabels()[1], visible=False)
         figure.suptitle(
@@ -519,18 +566,13 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         figure.savefig("%s/sed_%s.pdf" % (plot_dir, sed_type))
         plt.close(figure)
 
-    ExtinctionLaw.store_filter_attenuation = False
-    ExtinctionLaw.store_component_attenuation = False
-
-class DeltaDist(object):
-    def __init__(self, value):
-        self.value = value
-    def ppf(self, u):
-        return self.value
-    def mean(self):
-        return self.value
-    def std(self):
-        return 0
+    return (
+        param_names + posteriors_names,
+        np.concatenate((results['samples'].mean(axis=0), np.mean(posteriors, axis=0))), 
+        np.concatenate((results['samples'].std(axis=0), np.std(posteriors, axis=0))),
+        np.concatenate((np.quantile(results['samples'], 0.02275, axis=0), np.quantile(posteriors, 0.02275, axis=0))),
+        np.concatenate((np.quantile(results['samples'], 0.97725, axis=0), np.quantile(posteriors, 0.97725, axis=0))),
+    )
 
 def make_prior_transform(rv_redshift, Linfo = None):
     redshift_fixed = rv_redshift.std() == 0
@@ -554,13 +596,13 @@ def make_prior_transform(rv_redshift, Linfo = None):
         for module_parameters in parameter_list:
             for k, v in module_parameters.items():
                 if len(v) > 1:
-                    params[i] = v[int(len(v) * cube[i])]
+                    params[i] = v[min(len(v) - 1, int(len(v) * cube[i]))]
                     if is_log_param[i]:
                         params[i] = log10(params[i])
                     i += 1
         
         # stellar mass from 10^5 to 10^15
-        params[i] = cube[i] * 10 + 5
+        params[i] = cube[i] * (args.mass_max - 5) + 5
         
         # AGN luminosity from 10^30 to 10^50
         params[i+1] = L_prior_transform(cube[i+1])
@@ -578,8 +620,8 @@ def make_prior_transform(rv_redshift, Linfo = None):
     return prior_transform
 
 def plot_model():
-    umid = np.zeros(len(param_names)) + 0.5
-    for redshift in [0, 0.5, 1, 3]:
+    umid = np.array([1e-6 if 'E(B-V)' in p else 0.5 for p in param_names])
+    for redshift in [0.01, 0.5, 1, 3]:
         for logL_AGN in [38, 42, 44, 46]:
             L_AGN = 10**logL_AGN
             rv_redshift = scipy.stats.uniform(redshift, redshift+1e-3)
@@ -590,14 +632,16 @@ def plot_model():
             cache_filters = {}
             
             for i, p in enumerate(param_names):
-                if p in ('redshift', 'log(L_AGN)', 'activate.AGNtype'):
+                if p in ('redshift', 'log(L_AGN)', 'activate.AGNtype', 'systematics'):
                     continue
                 print("varying", p)
 
                 u = umid.copy()
-                for AGNtype in 1, 2:
+                for AGNtype in 1, 2, 3:
                     last_value = np.nan
-                    for v in np.linspace(0, 0.999, 11):
+                    first_legend = None
+                    total_lines = []
+                    for v in np.linspace(0.001, 0.999, 11):
                         u[i] = v
                         parameters = prior_transform(u)
                         parameters[param_names.index('activate.AGNtype')] = AGNtype
@@ -623,30 +667,43 @@ def plot_model():
                         assert (sed_multiplier >= 0).all(), (stellar_mass, DL, wavelength_spec)
                         wavelength_spec /= 1000
                         mask = np.logical_and(wavelength_spec >= PLOT_L_MIN, wavelength_spec <= PLOT_L_MAX)
+                        alpha = 1 - (v + 0.2) / 1.2
 
-                        if AGNtype == 1:
-                            plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], 
-                                color=plt.cm.viridis(v), label=parameters[i], ls='-')
-                        else:
-                            plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], 
-                                color=plt.cm.viridis(v), ls='--')
-                
-                plt.xlabel("Observed wavelength [$\mu$m]")
-                plt.ylabel("Flux [mJy]")
-                plt.xscale('log')
-                plt.yscale('log')
-                plt.legend(title=p, fontsize=6, loc='best', fancybox=True, framealpha=0.5)
-                plt.xlim(PLOT_L_MIN, PLOT_L_MAX)
-                plt.ylim(1e13, None)
-                #plt.setp(plt.gca().get_xticklabels(), visible=False)
-                #plt.setp(plt.gca().get_yticklabels()[1], visible=False)
-                
-                filename = 'modelspectrum_z%.1f_L%d_%s.png' % (redshift, logL_AGN, p.replace('(','').replace(')',''))
-                plt.savefig(filename, bbox_inches='tight')
-                plt.close()
-#            break
-#       break
-        
+                        # print(sed.contribution_names)
+                        for j, plot_element in enumerate(plot_elements):
+                            keys = plot_element['keys']
+                            if not all(k in sed.contribution_names for k in keys):
+                                # print("skipping", plot_element['label'], 'because need', keys, "have only some:", [k in sed.contribution_names for k in keys])
+                                continue
+                            
+                            pred = sum(sed.get_lumin_contribution(k) * sed_multiplier for k in keys)
+                            
+                            line_kwargs = dict(plot_element)
+                            del line_kwargs['keys']
+                            line_kwargs['alpha'] = alpha
+                            plt.plot(wavelength_spec[mask], pred[mask], **line_kwargs)
+                        
+                        line, = plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], '-', color='k', alpha=alpha, label='total')
+                        total_lines.append(line)
+                        
+                        if first_legend is None:
+                            first_legend = plt.legend(title='Components', framealpha=0.5, loc='upper left')
+                    plt.gca().add_artist(first_legend)
+
+                    plt.xlabel("Wavelength [$\mu$m]")
+                    plt.ylabel("Luminosity [W/nm]")
+                    plt.xscale('log')
+                    plt.yscale('log')
+                    plt.title(p)
+                    #plt.legend(handles=total_lines, fontsize=6, loc='upper center', fancybox=True, framealpha=0.5)
+                    plt.xlim(PLOT_L_MIN, PLOT_L_MAX)
+                    plt.ylim(1e-4, 1e5)
+                    #plt.setp(plt.gca().get_xticklabels(), visible=False)
+                    #plt.setp(plt.gca().get_yticklabels()[1], visible=False)
+                    
+                    filename = 'modelspectrum_z%.1f_L%d_type%s_%s.png' % (redshift, logL_AGN, AGNtype, p.replace('(','').replace(')',''))
+                    plt.savefig(filename, bbox_inches='tight')
+                    plt.close()
 
 def generate_fluxes():
     rv_redshift = scipy.stats.uniform(0, 6)
@@ -772,7 +829,7 @@ def analyse_obs(samplername, obs, plot=True):
     obs_errors = obs_errors_full[wobs]
     if not np.logical_and(obs_fluxes_full > 0, obs_errors_full > 0).any():
         print("ERROR: Source does not have detections, skipping")
-        return
+        return obs['id'], None
 
     cache_filters = {}
     
@@ -805,7 +862,10 @@ def analyse_obs(samplername, obs, plot=True):
         return -0.5 * chi2_ - norm
 
     outdir = "dualanalysis_%s_Chi2varNEV" % str(obs['id']).strip()
+    if args.mass_max != 15:
+        outdir += "_maxgal%d" % args.mass_max
     print("Sampling with sampler:", samplername)
+    results = None
     # print("  free parameters:", active_param_names, derived_param_names)
     if samplername == 'laplace':
         from snowline import ReactiveImportanceSampler
@@ -828,72 +888,77 @@ def analyse_obs(samplername, obs, plot=True):
                 delimiter=',', comments='', header=','.join(param_names)
             )
             if plot and not os.path.exists(outdir + '_laplace.pdf'):
-                plot_posteriors(outdir + '_laplace.pdf', prior_samples, param_names, results['samples'])
+                results = plot_posteriors(outdir + '_laplace.pdf', prior_samples, param_names, results['samples'])
     elif samplername == 'mcmc':
         from autoemcee import ReactiveAffineInvariantSampler
-        sampler = ReactiveAffineInvariantSampler(param_names, loglikelihood, prior_transform)
-        sampler.run()
-        sampler.print_results()
+        with FastExtinction():
+            sampler = ReactiveAffineInvariantSampler(param_names, loglikelihood, prior_transform)
+            sampler.run()
+            sampler.print_results()
         np.savetxt(
             outdir + '_mcmc.txt.gz', sampler.results['samples'], 
             delimiter=',', comments='', header=','.join(param_names)
         )
         if plot and not os.path.exists(outdir + '_mcmc.pdf'):
-            plot_posteriors(outdir + '_mcmc.pdf', prior_samples, param_names, sampler.results['samples'])
+            results = plot_posteriors(outdir + '_mcmc.pdf', prior_samples, param_names, sampler.results['samples'])
     elif samplername == 'nested':
-        sampler = ReactiveNestedSampler(
-            active_param_names, loglikelihood, prior_transform,
-            log_dir=outdir, resume=True, derived_param_names=derived_param_names)
-        sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=400, viz_callback=None)
-        sampler.print_results()
-        if plot:
-            try:
-                sampler.plot_corner()
-            except Exception:
-                pass
-            plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
-    elif samplername == 'nested-reactive':
-        sampler = ReactiveNestedSampler(
-            active_param_names, loglikelihood, prior_transform,
-            log_dir=outdir, resume=True, derived_param_names=derived_param_names)
-        sampler.run(frac_remain=0.5, max_num_improvement_loops=5, min_num_live_points=50, min_ess=500, dlogz=10, cluster_num_live_points=0)
-        sampler.print_results()
-        if plot:
-            try:
-                sampler.plot_corner()
-            except Exception:
-                pass
-            plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
-    elif samplername == 'nested-slice':
-        try:
+        with FastExtinction():
             sampler = ReactiveNestedSampler(
                 active_param_names, loglikelihood, prior_transform,
-                log_dir=outdir + "-slice", resume='resume', derived_param_names=derived_param_names)
-        except Exception:
-            sampler = ReactiveNestedSampler(
-                active_param_names, loglikelihood, prior_transform,
-                log_dir=outdir + "-slice", resume='overwrite', derived_param_names=derived_param_names)
-        import ultranest.stepsampler
-        print("run without step sampler ...")
-        sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, max_ncalls=10000, viz_callback=None)
-        print("run with step sampler ...")
-        sampler.stepsampler = ultranest.stepsampler.CubeSliceSampler(nsteps=20, max_nsteps=400, adaptive_nsteps='move-distance', region_filter=True)
-        for results in sampler.run_iter(
-            frac_remain=0.5, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, 
-            min_ess=100, viz_callback=None, max_num_improvement_loops=0,
-        ):
-            # sampler.stepsampler = None
+                log_dir=outdir, resume=True, derived_param_names=derived_param_names)
+            sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=400, viz_callback=None)
             sampler.print_results()
-            if plot:
-                try:
-                    sampler.plot_corner()
-                except Exception:
-                    pass
-                plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+        if plot:
+            try:
+                sampler.plot_corner()
+            except Exception:
+                pass
+            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+    elif samplername == 'nested-reactive':
+        with FastExtinction():
+            sampler = ReactiveNestedSampler(
+                active_param_names, loglikelihood, prior_transform,
+                log_dir=outdir, resume=True, derived_param_names=derived_param_names)
+            sampler.run(frac_remain=0.5, max_num_improvement_loops=5, min_num_live_points=50, min_ess=500, dlogz=10, cluster_num_live_points=0)
+            sampler.print_results()
+        if plot:
+            try:
+                sampler.plot_corner()
+            except Exception:
+                pass
+            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+    elif samplername == 'nested-slice':
+        with FastExtinction():
+            try:
+                sampler = ReactiveNestedSampler(
+                    active_param_names, loglikelihood, prior_transform,
+                    log_dir=outdir + "-slice", resume='resume', derived_param_names=derived_param_names)
+            except Exception:
+                print("WARNING: could not resume. overwriting.")
+                sampler = ReactiveNestedSampler(
+                    active_param_names, loglikelihood, prior_transform,
+                    log_dir=outdir + "-slice", resume='overwrite', derived_param_names=derived_param_names)
+            import ultranest.stepsampler
+            print("run without step sampler ...")
+            sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, max_ncalls=10000, viz_callback=None)
+            print("run with step sampler ...")
+            sampler.stepsampler = ultranest.stepsampler.CubeSliceSampler(nsteps=20, max_nsteps=400, adaptive_nsteps='move-distance', region_filter=True)
+            results = sampler.run(
+                frac_remain=0.5, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, 
+                min_ess=100, viz_callback=None, max_num_improvement_loops=0,
+            )
+            sampler.print_results()
+        if plot:
+            try:
+                sampler.plot_corner()
+            except Exception:
+                pass
+            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
     elif samplername == 'noop':
         pass
     else:
         raise ValueError("Unknown sampler: '%s'" % samplername)
+    return obs['id'], results
 
 def main():
     if args.action == 'generate-from-prior':
@@ -912,14 +977,33 @@ def main():
         indices = np.arange(len(obs_table_here))
         if args.randomize:
             np.random.shuffle(indices)
+        fout = None
         # analyse 20 observations in parallel, then reset children
         # this is to avoid excessive memory use (there is a memory leak).
         for i in np.array_split(indices, max(1, len(obs_table_here) // 20)):
             print("parallel analyses of indices:", i)
-            joblib.Parallel(n_jobs=args.cores)(
+            allresults = joblib.Parallel(n_jobs=args.cores)(
                 joblib.delayed(analyse_obs)(args.sampler, obs, plot)
                 for obs in obs_table_here[i]
             )
+            for id, result in allresults:
+                if result is None:
+                    print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
+                    continue
+                print("result", id, result)
+                names, means, stds, los, his = result
+                if fout is None:
+                    fout = open(data_file + '_analysis_results.txt', 'w')
+                    fout.write('# id')
+                    for name in names:
+                        fout.write('\t%s_mean\t%s_std\t%s_lo\t%s_hi' % (name, name, name, name))
+                    fout.write('\n')
+                fout.write("%s" % id)
+                for name, mean, std, lo, hi in zip(names, means, stds, los, his):
+                    fout.write("\t%g\t%g\t%g\t%g" % (mean, std, lo, hi))
+                fout.write('\n')
+                fout.flush()
+
         #for obs in obs_table:
         #    analyse_obs(samplername, obs, plot=plot)
         print("analying %d observations done." % len(obs_table_here))
