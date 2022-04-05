@@ -93,6 +93,8 @@ parser.add_argument('--every', type=int, default=1,
 
 parser.add_argument('--cores', type=int, default=-1,
 	help='number of processes to parallelise for (see joblib.Parallel)')
+parser.add_argument('--exponent', type=int, default=2,
+	help='Whether to use L2 (chi^2) statistics (default) or L1 statistics')
 
 parser.add_argument('--plot', action='store_true',
 	help='also make plots of the SED and parameter constraints')
@@ -199,7 +201,7 @@ def make_parameter_list(parameters):
         parameter_list_first.append(parameter_list_here)
     return parameter_list_first
 
-def get_model_fluxes(sed):
+def get_model_fluxes(sed, filters):
     if 'sfh.age' in sed.info and sed.info['sfh.age'] > sed.info['universe.age']:
         model_fluxes = -99. * np.ones(len(filters))
         model_variables = -99. * np.ones(len(analysed_variables))
@@ -281,17 +283,6 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     assert np.isfinite(scaled_sed.luminosity).all(), scaled_sed.luminosity
     return scaled_sed, sed, agn_sed
 
-#@functools.lru_cache(maxsize=None)
-
-#import joblib
-#mem = joblib.Memory('.', verbose=False)
-
-#@mem.cache
-#def compute_model_cached(parameters):
-#   parameter_list_here = make_parameter_list(parameters)
-#   sed, model_fluxes_full, model_variables = compute_model(parameter_list_here)
-#   return model_fluxes_full
-
 # Wavelength limits (restframe) when plotting the best SED.
 PLOT_L_MIN = 0.1
 PLOT_L_MAX = 50
@@ -300,11 +291,13 @@ def with_attenuation(keys):
     return keys + ['attenuation.' + key for key in keys]
 
 def plot_posteriors(filename, prior_samples, param_names, samples):
-    print("plotting posteriors")
+    print("plotting posteriors ...")
     plt.figure(figsize=(12, 12))
     for i, (param_name, samples) in enumerate(zip(param_names, samples.transpose())):
         plt.subplot(4, len(param_names) // 4 + 1, i + 1)
         bins = np.unique(list(set(prior_samples[:,i]).union(set(samples))))
+        if not np.isfinite(bins).all():
+            print("WARNING: parameter %s is bad, remove it from the analysis list" % param_name)
         if len(bins) > 2 and bins[-1] > bins[-2]:
             bins = np.concatenate((bins, [bins[-1] + bins[-1] - bins[-2]]))
         if len(bins) > 40:
@@ -354,6 +347,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         print("not replotting.")
         return
     plot_posteriors('%s/posteriors.pdf' % plot_dir, prior_samples, param_names, results['samples'])
+    print("making corner plot ...")
     smooth_samples = sampler.results['samples'].copy()
     for i in range(len(param_names)):
         bins = np.unique(prior_samples[:,i]).tolist()
@@ -369,6 +363,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     plt.savefig('%s/corner.pdf' % plot_dir)
     plt.close()
 
+    print("making SED instances ...")
     bands = {'lum':{}, 'mJy':{}}
     
     z = obs['redshift']
@@ -380,7 +375,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     posteriors = []
     all_mod_fluxes = []
     
-    for parameters in tqdm.tqdm(sampler.results['samples'][:500,:]):
+    for parameters in tqdm.tqdm(sampler.results['samples'][:50,:]):
         stellar_mass = 10**parameters[-4]
         L_AGN = 10**parameters[-3]
         redshift = parameters[-2]
@@ -390,13 +385,13 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
-        model_fluxes_full, model_variables = get_model_fluxes(sed)
+        model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
 
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
             module_instance = creation_modules.get_module(module_name, **module_parameters)
             module_instance.process(agn_sed)
 
-        agn_model_fluxes_full, _ = get_model_fluxes(agn_sed)
+        agn_model_fluxes_full, _ = get_model_fluxes(agn_sed, filters)
         agn_model_fluxes = agn_model_fluxes_full[wobs]
 
         NEV, Lbol = compute_NEV(L_AGN)
@@ -404,9 +399,9 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         mod_fluxes = model_fluxes_full[wobs]
         all_mod_fluxes.append(mod_fluxes)
 
-        _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, sys_error*0+0.1, NEV)
+        _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, sys_error*0+0.1, NEV, exponent=args.exponent)
         chi2_best = min(chi2_0, chi2_best)
-        norm, chi2_ = chi2_with_norm(mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV)
+        norm, chi2_ = chi2_with_norm(mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=args.exponent)
         posteriors.append(np.concatenate((np.log10(model_variables), [NEV, Lbol, chi2_])))
         
         wavelength_spec = sed.wavelength_grid
@@ -430,7 +425,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
                 if not all(k in sed.contribution_names for k in keys):
                     continue
                 if j not in bands[sed_type]:
-                    print("building", sed_type, plot_element['label'])
+                    print("  building", sed_type, plot_element['label'])
                     bands[sed_type][j] = PredictionBand(wavelength_spec2)
                 pred = sum(sed.get_lumin_contribution(k) * sed_multiplier for k in keys)
                 assert np.isfinite(pred).all(), pred
@@ -447,7 +442,28 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     print("selected:", posteriors_names)
     plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, np.array(posteriors))
     
+    print("write out flux predictions ...")
+    all_mod_fluxes = np.array(all_mod_fluxes)
     mod_fluxes = np.median(all_mod_fluxes, axis=0)
+    #mod_fluxes = np.median(all_mod_fluxes[:,wobs], axis=0)
+    with open('%s/fluxpredict.csv' % plot_dir, 'w') as fflux:
+        fflux.write('filtername,flux,flux_err\n')
+        for filtername, filterpred in zip(filters, all_mod_fluxes.transpose()):
+            fflux.write('%s,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred)))
+
+    print("write out sed ...")
+    for sed_type in 'mJy', 'lum':
+        header = ['wavelength']
+        seddata = [wavelength_spec2]
+        for j, plot_element in enumerate(plot_elements):
+            if j not in bands[sed_type]:
+                continue
+            k = plot_element['label']
+            header += [k, k + '_errup', k + '_errlo']
+            seddata.append(bands[sed_type][j].get_line())
+            seddata.append(bands[sed_type][j].get_line(0.5 + 0.341))
+            seddata.append(bands[sed_type][j].get_line(0.5 - 0.341))
+        np.savetxt('%s/sed_%s.csv.gz' % (plot_dir, sed_type), np.transpose(seddata), header=','.join(header), comments='', delimiter=',')
 
     for sed_type in 'mJy', 'lum':
         filters_wl = filters_wl_orig[wobs] / 1000
@@ -464,7 +480,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         bands[sed_type]['total'].line(color='k', label='Model spectrum', linewidth=1.5)
         for j, plot_element in enumerate(plot_elements):
             if j in bands[sed_type]:
-                print("plotting", sed_type, plot_element['label'], np.shape(bands[sed_type][j].ys))
+                print("  plotting", sed_type, plot_element['label'], np.shape(bands[sed_type][j].ys))
                 bands[sed_type][j].shade(0.45, color=plot_element['color'], 
                     #label=plot_element['label'] % sed.info, 
                     alpha=0.1)
@@ -519,7 +535,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         ax2.errorbar(filters_wl[mask],
                      (obs_fluxes[mask]-mod_fluxes[mask])/obs_fluxes[mask],
                      yerr=obs_fluxes_err[mask]/obs_fluxes[mask],
-                     marker='_', color='k',
+                     marker='x', color='k',
                      capsize=2, linestyle=' ', elinewidth=1)
         maxresid = max(1, max(np.abs((obs_fluxes[mask]-mod_fluxes[mask])/obs_fluxes[mask])))
         ax2.plot([xmin, xmax], [0., 0.], ls='--', color='k')
@@ -726,13 +742,13 @@ def generate_fluxes():
         sed, _, _ = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
 
-        model_fluxes_full, model_variables = get_model_fluxes(sed)
+        model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
         fluxdata[i][:len(param_names)] = parameters
         fluxdata[i][len(param_names):] = model_fluxes_full
 
     np.savetxt("model_fluxes.txt.gz", fluxdata, header=','.join(param_names + filters), delimiter=',', comments='')
 
-def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV):
+def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=2):
     # Some observations may not have flux values in some filter(s), but
     # they can have upper limit(s). To process upper limits, the user
     # is asked to put the upper limit as flux value and an error value with
@@ -754,8 +770,8 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_e
     mask_lim = np.logical_and(obs_errors >= -9990., obs_errors < TOLERANCE)
     total_variance = obs_errors[mask_data]**2 + (sys_error * model_fluxes)**2 + NEV * agn_model_fluxes**2
     chi2_ = np.sum(
-        (obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)
-    norm = 0.5 * np.log(2 * np.pi * total_variance).sum()
+        ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)**(exponent/2.0) )
+    norm = 0.5 * np.log(2 * np.pi * total_variance**(exponent/2.0)).sum()
 
     if mask_lim.any():
         uplim_errors = (-obs_errors[mask_lim])**2 + (sys_error * model_fluxes)**2 + NEV * agn_model_fluxes**2
@@ -770,6 +786,7 @@ def compute_NEV(L_AGN):
     # from Netzer+19 bolometric corrections
     Lbol = L_AGN * 40 * (L_AGN / 1e42)**-0.2
     # from Simm+16 Table 3: normalised excess variance as a function of Lbol
+    # NEV = min(0.1, 10**(-1.43 - 0.74 * np.log10(Lbol / 1e45)))
     NEV = min(0.1, 10**(-1.43 - 0.74 * np.log10(Lbol / 1e45)))
     # print('L5100=%.1e  Lbol=%.1e  var=%.4f' % (L_AGN, Lbol, NEV))
     return NEV, Lbol
@@ -832,6 +849,7 @@ def analyse_obs(samplername, obs, plot=True):
         return obs['id'], None
 
     cache_filters = {}
+    exponent = args.exponent
     
     def loglikelihood(parameters):
         stellar_mass = 10**parameters[-4]
@@ -845,23 +863,23 @@ def analyse_obs(samplername, obs, plot=True):
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
 
-        model_fluxes_full, model_variables = get_model_fluxes(sed)
+        model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
 
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
             module_instance = creation_modules.get_module(module_name, **module_parameters)
             module_instance.process(agn_sed)
 
-        agn_model_fluxes_full, _ = get_model_fluxes(agn_sed)
+        agn_model_fluxes_full, _ = get_model_fluxes(agn_sed, filters)
         agn_model_fluxes = agn_model_fluxes_full[wobs]
 
         model_fluxes = model_fluxes_full[wobs]
         
         NEV, Lbol = compute_NEV(L_AGN)
-        norm, chi2_ = chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV)
+        norm, chi2_ = chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=exponent)
         
         return -0.5 * chi2_ - norm
 
-    outdir = "dualanalysis_%s_Chi2varNEV" % str(obs['id']).strip()
+    outdir = "dualanalysis_%s_Chi%dvarNEV" % (str(obs['id']).strip(), exponent)
     if args.mass_max != 15:
         outdir += "_maxgal%d" % args.mass_max
     print("Sampling with sampler:", samplername)
@@ -876,7 +894,7 @@ def analyse_obs(samplername, obs, plot=True):
         sampler.cov = np.eye(len(param_names)) * 0.04
         sampler.invcov = np.linalg.inv(sampler.cov)
         # sampler.init_globally(num_global_samples=1000)
-        for results in sampler.run_iter(
+        for sampling_results in sampler.run_iter(
             num_gauss_samples=1000,
             min_ess=1000,
             max_improvement_loops=5,
@@ -884,11 +902,11 @@ def analyse_obs(samplername, obs, plot=True):
             print("Importance sampling ...")
             sampler.print_results()
             np.savetxt(
-                outdir + '_laplace.txt.gz', results['samples'], 
+                outdir + '_laplace.txt.gz', sampling_results['samples'], 
                 delimiter=',', comments='', header=','.join(param_names)
             )
             if plot and not os.path.exists(outdir + '_laplace.pdf'):
-                results = plot_posteriors(outdir + '_laplace.pdf', prior_samples, param_names, results['samples'])
+                results = plot_posteriors(outdir + '_laplace.pdf', prior_samples, param_names, sampling_results['samples'])
     elif samplername == 'mcmc':
         from autoemcee import ReactiveAffineInvariantSampler
         with FastExtinction():
@@ -943,7 +961,7 @@ def analyse_obs(samplername, obs, plot=True):
             sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, max_ncalls=10000, viz_callback=None)
             print("run with step sampler ...")
             sampler.stepsampler = ultranest.stepsampler.CubeSliceSampler(nsteps=20, max_nsteps=400, adaptive_nsteps='move-distance', region_filter=True)
-            results = sampler.run(
+            sampler.run(
                 frac_remain=0.5, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, 
                 min_ess=100, viz_callback=None, max_num_improvement_loops=0,
             )
