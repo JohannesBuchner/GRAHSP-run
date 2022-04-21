@@ -137,7 +137,6 @@ parameter_list = config.configuration['creation_modules_params']
 cache_depth = module_list.index('extinction')
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
-replot = os.environ.get('REPLOT', '0') == '1'
 if cache_print:
     print("Caching modules:", module_list[:cache_depth], "with %d entries" % cache_max)
 analysis_module = get_analysis_module(config.configuration[
@@ -334,7 +333,7 @@ plot_elements = [
     #     label="Model spectrum", color='k', marker=None, nonposy='clip', linestyle='-', linewidth=1.5, alpha=0.7),
 ]
 
-def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot):
+def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot):
     # only allow the main process to plot
     if not sampler.log:
         return
@@ -397,7 +396,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         NEV, Lbol = compute_NEV(L_AGN)
 
         mod_fluxes = model_fluxes_full[wobs]
-        all_mod_fluxes.append(mod_fluxes)
+        all_mod_fluxes.append(model_fluxes_full)
 
         _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, sys_error*0+0.1, NEV, exponent=args.exponent)
         chi2_best = min(chi2_0, chi2_best)
@@ -444,7 +443,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     
     print("write out flux predictions ...")
     all_mod_fluxes = np.array(all_mod_fluxes)
-    mod_fluxes = np.median(all_mod_fluxes, axis=0)
+    mod_fluxes = np.median(all_mod_fluxes, axis=0)[wobs]
     #mod_fluxes = np.median(all_mod_fluxes[:,wobs], axis=0)
     with open('%s/fluxpredict.csv' % plot_dir, 'w') as fflux:
         fflux.write('filtername,flux,flux_err\n')
@@ -463,6 +462,11 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             seddata.append(bands[sed_type][j].get_line())
             seddata.append(bands[sed_type][j].get_line(0.5 + 0.341))
             seddata.append(bands[sed_type][j].get_line(0.5 - 0.341))
+        k = 'total'
+        header += [k, k + '_errup', k + '_errlo']
+        seddata.append(bands[sed_type][k].get_line())
+        seddata.append(bands[sed_type][k].get_line(0.5 + 0.341))
+        seddata.append(bands[sed_type][k].get_line(0.5 - 0.341))
         np.savetxt('%s/sed_%s.csv.gz' % (plot_dir, sed_type), np.transpose(seddata), header=','.join(header), comments='', delimiter=',')
 
     for sed_type in 'mJy', 'lum':
@@ -883,6 +887,7 @@ def analyse_obs(samplername, obs, plot=True):
     if args.mass_max != 15:
         outdir += "_maxgal%d" % args.mass_max
     print("Sampling with sampler:", samplername)
+    replot = not os.path.exists(outdir + '/analysis_results.txt')
     results = None
     # print("  free parameters:", active_param_names, derived_param_names)
     if samplername == 'laplace':
@@ -931,7 +936,7 @@ def analyse_obs(samplername, obs, plot=True):
                 sampler.plot_corner()
             except Exception:
                 pass
-            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
     elif samplername == 'nested-reactive':
         with FastExtinction():
             sampler = ReactiveNestedSampler(
@@ -944,18 +949,20 @@ def analyse_obs(samplername, obs, plot=True):
                 sampler.plot_corner()
             except Exception:
                 pass
-            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
     elif samplername == 'nested-slice':
+        outdir += "-slice"
+        replot = not os.path.exists(outdir + '/analysis_results.txt')
         with FastExtinction():
             try:
                 sampler = ReactiveNestedSampler(
                     active_param_names, loglikelihood, prior_transform,
-                    log_dir=outdir + "-slice", resume='resume', derived_param_names=derived_param_names)
+                    log_dir=outdir, resume='resume', derived_param_names=derived_param_names)
             except Exception:
                 print("WARNING: could not resume. overwriting.")
                 sampler = ReactiveNestedSampler(
                     active_param_names, loglikelihood, prior_transform,
-                    log_dir=outdir + "-slice", resume='overwrite', derived_param_names=derived_param_names)
+                    log_dir=outdir, resume='overwrite', derived_param_names=derived_param_names)
             import ultranest.stepsampler
             print("run without step sampler ...")
             sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, max_ncalls=10000, viz_callback=None)
@@ -971,12 +978,24 @@ def analyse_obs(samplername, obs, plot=True):
                 sampler.plot_corner()
             except Exception:
                 pass
-            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters)
+            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
     elif samplername == 'noop':
         pass
     else:
         raise ValueError("Unknown sampler: '%s'" % samplername)
-    return obs['id'], results
+    if results is not None:
+        names, means, stds, los, his = results
+        with open(outdir + '/analysis_results.txt', 'w') as fout:
+            fout.write("%s" % id)
+            for name, mean, std, lo, hi in zip(names, means, stds, los, his):
+                fout.write("\t%g\t%g\t%g\t%g" % (mean, std, lo, hi))
+            fout.write('\n')
+    try:
+        results_string = open(outdir + '/analysis_results.txt', 'r').read()
+    except IOError:
+        results_string = None
+    
+    return obs['id'], results, results_string
 
 def main():
     if args.action == 'generate-from-prior':
@@ -1004,22 +1023,19 @@ def main():
                 joblib.delayed(analyse_obs)(args.sampler, obs, plot)
                 for obs in obs_table_here[i]
             )
-            for id, result in allresults:
-                if result is None:
+            for id, result, results_string in allresults:
+                if results_string is None:
                     print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
                     continue
                 print("result", id, result)
-                names, means, stds, los, his = result
+                names = param_names + analysed_variables + ['NEV', 'Lbol', 'chi2']
                 if fout is None:
                     fout = open(data_file + '_analysis_results.txt', 'w')
                     fout.write('# id')
                     for name in names:
                         fout.write('\t%s_mean\t%s_std\t%s_lo\t%s_hi' % (name, name, name, name))
                     fout.write('\n')
-                fout.write("%s" % id)
-                for name, mean, std, lo, hi in zip(names, means, stds, los, his):
-                    fout.write("\t%g\t%g\t%g\t%g" % (mean, std, lo, hi))
-                fout.write('\n')
+                fout.write(results_string)
                 fout.flush()
 
         #for obs in obs_table:
