@@ -110,7 +110,7 @@ parser.add_argument('--randomize', action='store_true',
 parser.add_argument('action', type=str, default='analyse', choices=('analyse', 'generate-from-prior', 'plot-model', 'list-filters'),
 	help='''Mode. Generate a file with fluxes from randomly drawn model instances, plot model SED variations, list the available photometric filters, or (default) analyse a photometry file.''')
 
-parser.add_argument('--sampler', type=str, default='', choices=('nested', 'mcmc', 'laplace', 'nested-slice', 'noop'),
+parser.add_argument('--sampler', type=str, default='nested-slice', choices=('nested', 'mcmc', 'laplace', 'nested-slice', 'noop'),
 	help='Parameter space sampling algorithm to use. Nested-slice is recommended.')
 
 
@@ -139,6 +139,7 @@ n_cores = args.cores
 parameter_list = config.configuration['creation_modules_params']
 cache_depth = module_list.index('extinction')
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
+chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
 if cache_print:
     print("Caching modules:", module_list[:cache_depth], "with %d entries" % cache_max)
@@ -456,6 +457,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     print("SED info available:", ' '.join(sed.info.keys()))
     print("selected:", posteriors_names)
     plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, np.array(posteriors))
+    np.savetxt('%s/derived.csv' % plot_dir, posteriors, header=','.join(posteriors_names), comments='', delimiter=',')
     
     print("write out flux predictions ...")
     all_mod_fluxes = np.array(all_mod_fluxes)
@@ -712,8 +714,8 @@ def plot_model():
                     mask = np.logical_and(wavelength_spec >= PLOT_L_MIN, wavelength_spec <= PLOT_L_MAX)
                     alpha = 1 - (v + 0.2) / 1.2
 
-                    outputs = []
-                    output_labels = []
+                    outputs = [wavelength_spec]
+                    output_labels = ['wavelength']
                     # print(sed.contribution_names)
                     for j, plot_element in enumerate(plot_elements):
                         keys = plot_element['keys']
@@ -738,8 +740,8 @@ def plot_model():
                         [np.concatenate((parameters, model_variables, [NEV, Lbol]))],
                         delimiter=',', header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'])
                     )
-                    np.savetxt(subfilename + '.txt', outputs, delimiter=',', header=','.join(output_labels), comments='')
-                    #total_lines.append(line)
+                    assert len(outputs)==len(output_labels), (np.shape(outputs), len(output_labels))
+                    np.savetxt(subfilename + '.txt', np.transpose(outputs), delimiter=',', header=','.join(output_labels), comments='')
                     
                     if first_legend is None:
                         first_legend = plt.legend(title='Components', framealpha=0.5, loc='upper left')
@@ -750,11 +752,7 @@ def plot_model():
                 plt.xscale('log')
                 plt.yscale('log')
                 plt.title(p)
-                #plt.legend(handles=total_lines, fontsize=6, loc='upper center', fancybox=True, framealpha=0.5)
-                #plt.xlim(PLOT_L_MIN, PLOT_L_MAX)
                 plt.ylim(1e34, 1e39)
-                #plt.setp(plt.gca().get_xticklabels(), visible=False)
-                #plt.setp(plt.gca().get_yticklabels()[1], visible=False)
                 
                 plt.savefig(filename + '.png', bbox_inches='tight')
                 plt.close()
@@ -767,13 +765,12 @@ def list_filters():
             print(f)
 
 
-def generate_fluxes():
+def generate_fluxes(Ngen=100000):
     rv_redshift = scipy.stats.uniform(0, 6)
     prior_transform = make_prior_transform(rv_redshift)
     cache_filters = {}
 
-    Ngen = 100000
-    fluxdata = np.empty((Ngen, len(param_names + analysed_variables) + 2 + len(filters)))
+    fluxdata = np.empty((Ngen, len(param_names + analysed_variables) + 2 + len(filters))) * np.nan
     u = np.random.uniform(size=len(param_names))
     for i in tqdm.trange(Ngen):
         u[np.random.randint(len(param_names))] = np.random.uniform()
@@ -795,8 +792,11 @@ def generate_fluxes():
         fluxdata[i][len(param_names + analysed_variables)] = NEV
         fluxdata[i][len(param_names + analysed_variables) + 1] = Lbol
         fluxdata[i][len(param_names + analysed_variables) + 2:] = model_fluxes_full
+        assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
 
-    np.savetxt("model_fluxes.txt.gz", fluxdata, header=','.join(param_names + filters), delimiter=',', comments='')
+    np.savetxt(
+        "model_fluxes.txt.gz", fluxdata, delimiter=',', comments='',
+        header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'] + filters))
 
 def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=2):
     # Some observations may not have flux values in some filter(s), but
@@ -850,8 +850,8 @@ def analyse_obs(samplername, obs, plot=True):
     redshift_mean = obs['redshift']
     if 'redshift_err' not in obs.colnames and samplername.startswith('nested'):
         rv_redshift = DeltaDist(redshift_mean)
-        active_param_names = param_names[:-2] + param_names[-1:]
-        derived_param_names = [param_names[-2]]
+        active_param_names = param_names[:-1]
+        derived_param_names = [param_names[-1]]
     else:
         if 'redshift_err' in obs.colnames:
             redshift_err = obs['redshift_err']
@@ -982,7 +982,7 @@ def analyse_obs(samplername, obs, plot=True):
             sampler = ReactiveNestedSampler(
                 active_param_names, loglikelihood, prior_transform,
                 log_dir=outdir, resume=True, derived_param_names=derived_param_names)
-            sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=400, viz_callback=None)
+            sampler.run(frac_remain=0.9, max_num_improvement_loops=0, min_num_live_points=400, viz_callback=None)
             sampler.print_results()
         if plot:
             results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
@@ -1030,7 +1030,7 @@ def analyse_obs(samplername, obs, plot=True):
     if results is not None:
         names, means, stds, los, his = results
         with open(outdir + '/analysis_results.txt', 'w') as fout:
-            fout.write("%s" % id)
+            fout.write("%s" % obs['id'])
             for name, mean, std, lo, hi in zip(names, means, stds, los, his):
                 fout.write("\t%g\t%g\t%g\t%g" % (mean, std, lo, hi))
             fout.write('\n')
@@ -1063,7 +1063,7 @@ def main():
         fout = None
         # analyse 20 observations in parallel, then reset children
         # this is to avoid excessive memory use (there is a memory leak).
-        for i in np.array_split(indices, max(1, len(obs_table_here) // 20)):
+        for i in np.array_split(indices, max(1, len(obs_table_here) // chunk_size)):
             print("processing chunk with indices:", i)
             allresults = joblib.Parallel(n_jobs=args.cores)(
                 joblib.delayed(analyse_obs)(args.sampler, obs, plot)
