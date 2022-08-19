@@ -841,11 +841,23 @@ def compute_NEV(L_AGN):
     # print('L5100=%.1e  Lbol=%.1e  var=%.4f' % (L_AGN, Lbol, NEV))
     return NEV, Lbol
 
-def analyse_obs(samplername, obs, plot=True):
+def analyse_obs_wrapper(samplername, obs, plot=True):
     # new source, so start fresh
     gbl_warehouse.partial_clear_cache(0)
     import gc; gc.collect()
+    try:
+        return analyse_obs(samplername, obs, plot=plot)
+    except OSError as e:
+        print("skipping, probably analysed on another machine. error was: %s" % e)
+        return obs['id'], None, None
+    except RuntimeError as e:
+        print("skipping, probably analysed on another machine. error was: %s" % e)
+        return obs['id'], None, None
+    except BlockingIOError as e:
+        print("skipping, probably analysed on another machine. error was: %s" % e)
+        return obs['id'], None, None
 
+def analyse_obs(samplername, obs, plot=True):
     np.random.seed(1)
     redshift_mean = obs['redshift']
     if 'redshift_err' not in obs.colnames and samplername.startswith('nested'):
@@ -986,6 +998,7 @@ def analyse_obs(samplername, obs, plot=True):
             sampler.print_results()
         if plot:
             results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
+        sampler.pointstore.close()
     elif samplername == 'nested-reactive':
         with FastExtinction():
             sampler = ReactiveNestedSampler(
@@ -995,6 +1008,7 @@ def analyse_obs(samplername, obs, plot=True):
             sampler.print_results()
         if plot:
             results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
+        sampler.pointstore.close()
     elif samplername == 'nested-slice':
         outdir += "-slice"
         replot = not os.path.exists(outdir + '/analysis_results.txt')
@@ -1003,8 +1017,9 @@ def analyse_obs(samplername, obs, plot=True):
                 sampler = ReactiveNestedSampler(
                     active_param_names, loglikelihood, prior_transform,
                     log_dir=outdir, resume='resume', derived_param_names=derived_param_names)
-            except Exception:
-                print("WARNING: could not resume. overwriting.")
+            except Exception as e:
+                print("WARNING: could not resume because of %s. overwriting." % e)
+                os.unlink(outdir + '/results/points.hdf5')
                 # previous results are invalid, so start from scratch
                 replot = True
                 sampler = ReactiveNestedSampler(
@@ -1023,6 +1038,7 @@ def analyse_obs(samplername, obs, plot=True):
             sampler.print_results()
         if plot:
             results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
+        sampler.pointstore.close()
     elif samplername == 'noop':
         pass
     else:
@@ -1066,7 +1082,7 @@ def main():
         for i in np.array_split(indices, max(1, len(obs_table_here) // chunk_size)):
             print("processing chunk with indices:", i)
             allresults = joblib.Parallel(n_jobs=args.cores)(
-                joblib.delayed(analyse_obs)(args.sampler, obs, plot)
+                joblib.delayed(analyse_obs_wrapper)(args.sampler, obs, plot)
                 for obs in obs_table_here[i]
             )
             for id, result, results_string in allresults:
