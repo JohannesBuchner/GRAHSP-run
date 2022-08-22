@@ -95,10 +95,6 @@ parser.add_argument('--every', type=int, default=1,
 
 parser.add_argument('--cores', type=int, default=-1,
 	help='number of processes to parallelise for (see joblib.Parallel)')
-parser.add_argument('--exponent', type=int, default=2,
-	help='Whether to use L2 (chi^2) statistics (default) or L1 statistics')
-parser.add_argument('--systematics-width', type=float, default=0.05,
-	help='Width of the half-Cauchy prior on the systematics')
 
 parser.add_argument('--plot', action='store_true',
 	help='also make plots of the SED and parameter constraints')
@@ -134,10 +130,13 @@ config = Configuration("pcigale.ini")
 data_file = config.configuration['data_file']
 column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
+statistics_config = config.config['statistics']
 # n_cores = int(config.configuration['cores'])
 n_cores = args.cores
 parameter_list = config.configuration['creation_modules_params']
 cache_depth = module_list.index('extinction')
+if module_list[cache_depth - 1] == 'activatepl':
+    cache_depth -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
 chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
@@ -151,6 +150,12 @@ analysed_variables = analysis_module_params["analysed_variables"]
 n_variables = len(analysed_variables)
 lim_flag = analysis_module_params["lim_flag"].lower() == "true"
 mock_flag = analysis_module_params["mock_flag"].lower() == "true"
+
+exponent = int(statistics_config.get('exponent', '2'))
+with_uv_model_uncertainty = statistics_config.get('uv_model_uncertainty', 'false').lower() == 'true'
+variability_uncertainty = statistics_config.get('variability_uncertainty', 'true').lower() == 'true'
+systematics_width = float(statistics_config.get('systematics_width', '0.01'))
+
 
 filters = [name for name in column_list if not name.endswith('_err')]
 with Database() as base:
@@ -184,7 +189,16 @@ param_names.append("log(stellar_mass)")
 param_names.append("log(L_AGN)")
 param_names.append("redshift")
 param_names.append("systematics")
-rv_systematics = scipy.stats.halfcauchy(scale=args.systematics_width)
+rv_systematics = scipy.stats.halfcauchy(scale=systematics_width)
+
+print("Statistics")
+print("----------")
+print(" Exponent: %d (%s)" % (exponent, {1:'L1',2:'Gaussian'}[exponent]))
+print(" model uncertainty: ")
+print("    white: half-cauchy width: %s" % systematics_width)
+print("    wavelength-dependent: UV: %s" % with_uv_model_uncertainty)
+print("    variability: %s" % variability_uncertainty)
+print()
 
 def make_parameter_list(parameters):
     parameter_list_first = []
@@ -346,7 +360,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     plot_dir = sampler.logs['plots']
     assert np.isfinite(results['samples']).all()
     
-    if not replot and all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'sed_mJy', 'sed_lum', 'corner'))):
+    if not replot and all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'derived', 'sed_mJy', 'sed_lum', 'corner'))):
         print("not replotting.")
         return
     plot_posteriors('%s/posteriors.pdf' % plot_dir, prior_samples, param_names, results['samples'])
@@ -390,6 +404,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     posteriors_names = analysed_variables + ['NEV', 'Lbol', 'chi2']
     posteriors = []
     all_mod_fluxes = []
+    obs_filter_wavelength = filters_wl_orig[wobs]
     
     for parameters in tqdm.tqdm(sampler.results['samples'][:50,:]):
         stellar_mass = 10**parameters[-4]
@@ -415,9 +430,9 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         mod_fluxes = model_fluxes_full[wobs]
         all_mod_fluxes.append(model_fluxes_full)
 
-        _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, sys_error*0+0.1, NEV, exponent=args.exponent)
+        _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, obs_filter_wavelength * np.inf, redshift, sys_error*0+0.1, NEV, exponent=exponent)
         chi2_best = min(chi2_0, chi2_best)
-        norm, chi2_ = chi2_with_norm(mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=args.exponent)
+        norm, chi2_ = chi2_with_norm(mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, exponent=exponent)
         posteriors.append(np.concatenate((np.log10(model_variables), [NEV, Lbol, chi2_])))
         
         wavelength_spec = sed.wavelength_grid
@@ -798,7 +813,7 @@ def generate_fluxes(Ngen=100000):
         "model_fluxes.txt.gz", fluxdata, delimiter=',', comments='',
         header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'] + filters))
 
-def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=2):
+def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, exponent=2):
     # Some observations may not have flux values in some filter(s), but
     # they can have upper limit(s). To process upper limits, the user
     # is asked to put the upper limit as flux value and an error value with
@@ -818,13 +833,31 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_e
     # i.e., when (obs_flux is >=0. (and obs_errors>=-9990., obs_errors<0.))
     # and lim_flag=True
     mask_lim = np.logical_and(obs_errors >= -9990., obs_errors < TOLERANCE)
-    total_variance = obs_errors[mask_data]**2 + (sys_error * model_fluxes)**2 + NEV * agn_model_fluxes**2
+    
+    # variance from observation, according to the reported errors
+    obs_variance = obs_errors[mask_data]**2
+    # variance from year-to-year variability (Simm+ paper)
+    if variability_uncertainty:
+        var_variance = NEV * agn_model_fluxes**2
+    else:
+        var_variance = 0.0
+    # variance from model systematic uncertainties
+    sys_variance = (sys_error * model_fluxes)**2
+    if with_uv_model_uncertainty:
+        # UV model error
+        rest_filter_wavelength = obs_filter_wavelength / (1 + redshift)
+        sys_variance[rest_filter_wavelength < 125] = 1e16
+        #sys_variance += (4 * (rest_filter_wavelength / 91.0)**-4 * model_fluxes)**2
+        # print(np.array(list(zip(filters, obs_filter_wavelength, rest_filter_wavelength, sys_variance))))
+    # combined variance in each filter
+    total_variance = obs_variance + sys_variance + var_variance
+
     chi2_ = np.sum(
         ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)**(exponent/2.0) )
     norm = 0.5 * np.log(2 * np.pi * total_variance**(exponent/2.0)).sum()
 
     if mask_lim.any():
-        uplim_errors = (-obs_errors[mask_lim])**2 + (sys_error * model_fluxes)**2 + NEV * agn_model_fluxes**2
+        uplim_errors = (-obs_errors[mask_lim])**2 + sys_variance + var_variance
         chi2_ += -2. * log(
                 np.sqrt(np.pi/2.)*(-obs_errors[mask_lim])*(
                     1.+erf(
@@ -845,6 +878,7 @@ def analyse_obs_wrapper(samplername, obs, plot=True):
     # new source, so start fresh
     gbl_warehouse.partial_clear_cache(0)
     import gc; gc.collect()
+    #np.random.seed(1)
     try:
         return analyse_obs(samplername, obs, plot=plot)
     except OSError as e:
@@ -858,7 +892,6 @@ def analyse_obs_wrapper(samplername, obs, plot=True):
         return obs['id'], None, None
 
 def analyse_obs(samplername, obs, plot=True):
-    np.random.seed(1)
     redshift_mean = obs['redshift']
     if 'redshift_err' not in obs.colnames and samplername.startswith('nested'):
         rv_redshift = DeltaDist(redshift_mean)
@@ -906,12 +939,12 @@ def analyse_obs(samplername, obs, plot=True):
     wobs = np.where(obs_fluxes_full > TOLERANCE)
     obs_fluxes = obs_fluxes_full[wobs]
     obs_errors = obs_errors_full[wobs]
+    obs_filter_wavelength = filters_wl_orig[wobs]
     #if not np.logical_and(obs_fluxes_full > 0, obs_errors_full > 0).any():
     #    print("ERROR: Source does not have detections, skipping")
     #    return obs['id'], None, None
 
     cache_filters = {}
-    exponent = args.exponent
     
     def loglikelihood(parameters):
         if loglikelihood.last_parameters is not None and np.all(loglikelihood.last_parameters == parameters):
@@ -939,7 +972,11 @@ def analyse_obs(samplername, obs, plot=True):
         model_fluxes = model_fluxes_full[wobs]
         
         NEV, Lbol = compute_NEV(L_AGN)
-        norm, chi2_ = chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, sys_error, NEV, exponent=exponent)
+
+        # get unobscured luminosities at filter wavelengths
+        # agn_sed.luminosities[:-1].sum(0)
+        
+        norm, chi2_ = chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, exponent=exponent)
         
         logl = -0.5 * chi2_ - norm
         loglikelihood.last_parameters = parameters
@@ -948,7 +985,12 @@ def analyse_obs(samplername, obs, plot=True):
     loglikelihood.last_parameters = None
     loglikelihood.last_loglikelihood = None
 
-    outdir = "dualanalysis_%s_Chi%dvarNEV" % (str(obs['id']).strip(), exponent)
+    outdir = "dualanalysis_%s_var%s%s%d" % (
+        str(obs['id']).strip(),
+        'V' if variability_uncertainty else '',
+        'U' if with_uv_model_uncertainty else '',
+        -int(np.log10(systematics_width)),
+    )
     if args.mass_max != 15:
         outdir += "_maxgal%d" % args.mass_max
     print("Sampling with sampler:", samplername)
