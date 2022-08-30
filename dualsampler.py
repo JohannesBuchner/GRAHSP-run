@@ -135,8 +135,9 @@ statistics_config = config.config['statistics']
 n_cores = args.cores
 parameter_list = config.configuration['creation_modules_params']
 cache_depth = module_list.index('extinction')
+cache_depth_to_clear = cache_depth
 if module_list[cache_depth - 1] == 'activatepl':
-    cache_depth -= 1
+    cache_depth_to_clear -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
 chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
@@ -240,11 +241,9 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
         for k in sorted(module_parameters_available.keys()):
             selected_value = module_parameters_selected[k]
             mock_value = module_parameters_available[k][0]
-            if k in ('redshift', 'AGNtype', 'E(B-V)', 'E(B-V)-AGN'):
+            if module_name in parameter_list[cache_depth:]:
                 # use the true value in both cases, because:
-                # 1) redshift applies to both
-                # 2) extinction module is applied after both and not cached
-                # 3) AGNtype varies the number of parameters
+                # module applies to both and is not cached
                 parameter_list_gal_here[k] = selected_value
                 parameter_list_agn_here[k] = selected_value
             elif 'activate' in module_name or 'AGN' in k:
@@ -261,7 +260,7 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
 
     if len(gbl_warehouse.storage.dictionary) > cache_max:
         if cache_print: print("clearing cache:", len(gbl_warehouse.storage.dictionary))
-        gbl_warehouse.partial_clear_cache(cache_depth)
+        gbl_warehouse.partial_clear_cache(cache_depth_to_clear)
         if cache_print: print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
     sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_gal[:cache_depth])
     agn_sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_agn[:cache_depth])
@@ -287,7 +286,7 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
 
     # apply the remaining modules
     for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_gal[cache_depth:]):
-        module_instance = creation_modules.get_module(module_name, **module_parameters)
+        module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
         module_instance.process(scaled_sed)
 
     #print("IGM:", igm.min(), igm.max())
@@ -419,7 +418,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
 
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
-            module_instance = creation_modules.get_module(module_name, **module_parameters)
+            module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
             module_instance.process(agn_sed)
 
         agn_model_fluxes_full, _ = get_model_fluxes(agn_sed, filters)
@@ -842,7 +841,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
     else:
         var_variance = 0.0
     # variance from model systematic uncertainties
-    sys_variance = (sys_error * model_fluxes)**2
+    sys_variance = (sys_error * agn_model_fluxes)**2
     if with_uv_model_uncertainty:
         # UV model error
         rest_filter_wavelength = obs_filter_wavelength / (1 + redshift)
