@@ -341,7 +341,7 @@ plot_elements = [
          label="Nebular emission", color='y', marker=None, linewidth=.5),
     dict(keys=with_attenuation(['agn.activate_Disk']),
          label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
-    dict(keys=with_attenuation(['agn.activate_Torus']),
+    dict(keys=with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
          label="AGN torus", color=[0.90, 0.77, 0.42], marker=None, linestyle='-', linewidth=1.5),
     dict(keys=with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_EmLines_LINER']),
          label="AGN lines", color=[0.90, 0.50, 0.21], marker=None, linestyle='-', linewidth=0.5),
@@ -728,8 +728,8 @@ def plot_model():
                     mask = np.logical_and(wavelength_spec >= PLOT_L_MIN, wavelength_spec <= PLOT_L_MAX)
                     alpha = 1 - (v + 0.2) / 1.2
 
-                    outputs = [wavelength_spec]
-                    output_labels = ['wavelength']
+                    output_labels = ['wavelength', 'total']
+                    outputs = [wavelength_spec, sed.luminosity * sed_multiplier]
                     # print(sed.contribution_names)
                     for j, plot_element in enumerate(plot_elements):
                         keys = plot_element['keys']
@@ -746,8 +746,6 @@ def plot_model():
                         outputs.append(pred)
                         output_labels.append(plot_element['label'])
                     
-                    #outputs.append(sed.luminosity * sed_multiplier)
-                    #output_values.append(parameters)
                     line, = plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], '-', color='k', alpha=alpha, label='total')
                     subfilename = filename + '_at%s' % (parameters[i])
                     np.savetxt(subfilename + '.params',
