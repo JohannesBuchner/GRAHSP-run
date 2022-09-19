@@ -235,13 +235,13 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     # get sed for galaxy
     parameter_list_gal = []
     parameter_list_agn = []
-    for module_name, module_parameters_available, module_parameters_selected in zip(module_list, parameter_list, parameter_list_here):
+    for i, (module_name, module_parameters_available, module_parameters_selected) in enumerate(zip(module_list, parameter_list, parameter_list_here)):
         parameter_list_gal_here = {}
         parameter_list_agn_here = {}
         for k in sorted(module_parameters_available.keys()):
             selected_value = module_parameters_selected[k]
             mock_value = module_parameters_available[k][0]
-            if module_name in parameter_list[cache_depth:]:
+            if i >= cache_depth:
                 # use the true value in both cases, because:
                 # module applies to both and is not cached
                 parameter_list_gal_here[k] = selected_value
@@ -285,7 +285,7 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     scaled_sed.luminosity = scaled_sed.luminosities.sum(0)
 
     # apply the remaining modules
-    for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_gal[cache_depth:]):
+    for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
         module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
         module_instance.process(scaled_sed)
 
@@ -678,7 +678,7 @@ def make_prior_transform(rv_redshift, Linfo = None):
 def plot_model():
     umid = np.array([1e-6 if 'E(B-V)' in p else 0.5 for p in param_names])
     redshift = 1.0
-    for logL_AGN in [38, 42, 44, 46]:
+    for logL_AGN in [44, 38, 46, 42]:
         L_AGN = 10**logL_AGN
         rv_redshift = scipy.stats.uniform(redshift, redshift+1e-3)
         prior_transform = make_prior_transform(rv_redshift)
@@ -695,6 +695,7 @@ def plot_model():
             u = umid.copy()
             for AGNtype in 1, 2, 3:
                 last_value = np.nan
+                plt.figure(figsize=(12, 6))
                 filename = 'modelspectrum_L%d_type%s_%s' % (logL_AGN, AGNtype, p.replace('(','').replace(')',''))
                 first_legend = None
                 #total_lines = []
@@ -760,9 +761,10 @@ def plot_model():
                 plt.gca().add_artist(first_legend)
 
                 plt.xlabel("Wavelength [$\mu$m]")
-                plt.ylabel("Luminosity [W/nm]")
+                plt.ylabel("Luminosity [W]")
                 plt.xscale('log')
                 plt.yscale('log')
+                plt.xlim(PLOT_L_MIN, PLOT_L_MAX)
                 plt.title(p)
                 plt.ylim(1e34, 1e39)
                 
