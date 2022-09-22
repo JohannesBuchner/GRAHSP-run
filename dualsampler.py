@@ -893,7 +893,7 @@ def analyse_obs_wrapper(samplername, obs, plot=True):
 def analyse_obs(samplername, obs, plot=True):
     redshift_mean = obs['redshift']
     num_redshift_points = 40
-    if samplername.startswith('nested') and ('redshift_err' not in obs.colnames or obs.colnames['redshift_err']<=0.001):
+    if samplername.startswith('nested') and ('redshift_err' not in obs.colnames or 0<=obs['redshift_err']<=0.001):
         rv_redshift = DeltaDist(redshift_mean)
         active_param_names = param_names[:-1]
         derived_param_names = [param_names[-1]]
@@ -903,11 +903,10 @@ def analyse_obs(samplername, obs, plot=True):
         else:
             # put a 1% error on 1+z, at least
             redshift_err = 0.01 * redshift_mean
-        if redshift_mean <= -1:
+        if redshift_err < 0:
             num_redshift_points = 200
             print("unknown-z mode: flat redshift prior from 0 to 6")
             # flat redshift distribution, photo-z mode
-            redshift_samples = np.random.normal(redshift_mean, redshift_err, size=1000)
             rv_redshift = scipy.stats.uniform(0.001, 6)
         else:
             rng = np.random.default_rng(42)
