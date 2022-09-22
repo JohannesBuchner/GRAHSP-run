@@ -630,7 +630,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         np.concatenate((np.quantile(results['samples'], 0.97725, axis=0), np.quantile(posteriors, 0.97725, axis=0))),
     )
 
-def make_prior_transform(rv_redshift, Linfo = None):
+def make_prior_transform(rv_redshift, Linfo=None, num_redshift_points=40):
     redshift_fixed = rv_redshift.std() == 0
     if Linfo is None:
         def L_prior_transform(u):
@@ -667,7 +667,7 @@ def make_prior_transform(rv_redshift, Linfo = None):
         # redshift. 
         # params[i+1] = rv_redshift.ppf(cube[i+1])
         # Approximate redshift with points on the CDF
-        params[i + 2] = rv_redshift.ppf((1 + np.round(cube[i+2] * 40)) / 42)
+        params[i + 2] = rv_redshift.ppf((1 + np.round(cube[i+2] * num_redshift_points)) / (num_redshift_points+2))
         j = i + 2 if redshift_fixed else i + 3
         
         # systematic uncertainty
@@ -892,7 +892,8 @@ def analyse_obs_wrapper(samplername, obs, plot=True):
 
 def analyse_obs(samplername, obs, plot=True):
     redshift_mean = obs['redshift']
-    if 'redshift_err' not in obs.colnames and samplername.startswith('nested'):
+    num_redshift_points = 40
+    if samplername.startswith('nested') and ('redshift_err' not in obs.colnames or obs.colnames['redshift_err']<=0.001):
         rv_redshift = DeltaDist(redshift_mean)
         active_param_names = param_names[:-1]
         derived_param_names = [param_names[-1]]
@@ -902,12 +903,21 @@ def analyse_obs(samplername, obs, plot=True):
         else:
             # put a 1% error on 1+z, at least
             redshift_err = 0.01 * redshift_mean
-        redshift_samples = np.random.normal(redshift_mean, redshift_err, size=1000)
-        redshift_samples = redshift_samples[redshift_samples>0]
-        redshift_shape, _, redshift_scale = scipy.stats.weibull_min.fit(
-            redshift_samples, floc=0,
-        )
-        rv_redshift = scipy.stats.weibull_min(redshift_shape, scale=redshift_scale)
+        if redshift_mean <= -1:
+            num_redshift_points = 200
+            print("unknown-z mode: flat redshift prior from 0 to 6")
+            # flat redshift distribution, photo-z mode
+            redshift_samples = np.random.normal(redshift_mean, redshift_err, size=1000)
+            rv_redshift = scipy.stats.uniform(0.001, 6)
+        else:
+            rng = np.random.default_rng(42)
+            redshift_samples = rng.normal(redshift_mean, redshift_err, size=1000)
+            redshift_samples = redshift_samples[redshift_samples>0]
+            redshift_shape, _, redshift_scale = scipy.stats.weibull_min.fit(
+                redshift_samples, floc=0,
+            )
+            rv_redshift = scipy.stats.weibull_min(redshift_shape, scale=redshift_scale)
+            print("photo-z mode: redshift prior: ", redshift_shape, redshift_scale)
         active_param_names = param_names
         derived_param_names = []
 
@@ -925,9 +935,10 @@ def analyse_obs(samplername, obs, plot=True):
     else:
         Linfo = None
     
-    prior_transform = make_prior_transform(rv_redshift, Linfo)
+    prior_transform = make_prior_transform(rv_redshift, Linfo, num_redshift_points=num_redshift_points)
     
     prior_samples = np.asarray([prior_transform(u) for u in np.random.uniform(size=(10000, len(active_param_names)))])
+    assert np.isfinite(prior_samples[0]).all(), (prior_samples[0])
     assert np.isfinite(prior_samples).all(), (np.where(~np.isfinite(prior_samples).all(axis=0)), np.where(~np.isfinite(prior_samples).all(axis=1)), prior_samples[~np.isfinite(prior_samples)])
 
     # select the filters from the list of active filters
