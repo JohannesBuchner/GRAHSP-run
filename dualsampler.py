@@ -9,7 +9,7 @@ Features:
 - Flexible empirical AGN model to avoid modelling bias
 - broad and narrow line emission from AGN, in addition to accretion disk and obscurer.
 - allows obscurer diversity (hotter and colder dust) and 12µm Si in emission or absorption
-- allows different extinction for AGN and host, with the more appropriate Prevot law.
+- allows different attenuation for AGN and host, with the more appropriate Prevot law.
 - allows systematic modelling uncertainties, prevents biased overfits with overconfident errors
 - allows AGN variability across assembled photometry points (L-dependent)
 - allows redshift uncertainties (from photo-z)
@@ -36,83 +36,14 @@ import argparse
 import numpy as np
 from numpy import log, log10
 from math import erf
+import logging
+from importlib import import_module
 
 import scipy.stats
 from scipy.constants import c
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-from ultranest import ReactiveNestedSampler
-from ultranest.plot import PredictionBand
-import tqdm
-import joblib
-import getdist, getdist.plots, getdist.chains
-getdist.chains.print_load_details = False
-import logging
-
-class DeltaDist(object):
-    """Dirac Delta distribution."""
-    def __init__(self, value):
-        self.value = value
-    def ppf(self, u):
-        return self.value
-    def mean(self):
-        return self.value
-    def std(self):
-        return 0
-
-
-class FastExtinction(object):
-    """Context within which the extinction law reduces computation.
-
-    Per-filter extinctions, and per-component extinction are skipped.
-    """
-    def __enter__(self):
-        ExtinctionLaw.store_filter_attenuation = False
-        ExtinctionLaw.store_component_attenuation = False
-    def __exit__(self, type, value, traceback):
-        ExtinctionLaw.store_filter_attenuation = True
-        ExtinctionLaw.store_component_attenuation = True
-
-
-class HelpfulParser(argparse.ArgumentParser):
-	def error(self, message):
-		sys.stderr.write('error: %s\n' % message)
-		self.print_help()
-		sys.exit(2)
-
-
-parser = HelpfulParser(description=__doc__,
-	epilog="""Johannes Buchner (C) 2013-2022 <johannes.buchner.acad@gmx.com>""",
-	formatter_class=argparse.RawDescriptionHelpFormatter)
-
-
-parser.add_argument('--offset', type=int, default=0,
-	help='row in the input file to begin processing')
-
-parser.add_argument('--every', type=int, default=1,
-	help='stride in the input file to process (every nth row)')
-
-parser.add_argument('--cores', type=int, default=-1,
-	help='number of processes to parallelise for (see joblib.Parallel)')
-
-parser.add_argument('--plot', action='store_true',
-	help='also make plots of the SED and parameter constraints')
-parser.add_argument('--mass-max', type=float, default=15,
-	help='Maximum stellar mass.')
-parser.add_argument('--randomize', action='store_true',
-	help='Randomize order in which to analyse observations.')
-
-parser.add_argument('action', type=str, default='analyse', choices=('analyse', 'generate-from-prior', 'plot-model', 'list-filters'),
-	help='''Mode. Generate a file with fluxes from randomly drawn model instances, plot model SED variations, list the available photometric filters, or (default) analyse a photometry file.''')
-
-parser.add_argument('--sampler', type=str, default='nested-slice', choices=('nested', 'mcmc', 'laplace', 'nested-slice', 'noop'),
-	help='Parameter space sampling algorithm to use. Nested-slice is recommended.')
-
-
-args = parser.parse_args()
-
-print("loading cigale ...")
 from pcigale.session.configuration import Configuration
 from pcigale.analysis_modules import get_module as get_analysis_module
 from pcigale.utils import read_table
@@ -121,9 +52,116 @@ from pcigale.warehouse import SedWarehouse
 from pcigale import creation_modules
 from pcigale.analysis_modules.pdf_analysis import TOLERANCE
 from pcigale.data import Database
-gbl_warehouse = SedWarehouse()
-from pcigale.creation_modules.extinction import ExtinctionLaw
+from pcigale.creation_modules.biattenuation import BiAttenuationLaw
+from pcigale.creation_modules.redshifting import cosmology
 
+from ultranest import ReactiveNestedSampler
+from ultranest.plot import PredictionBand
+import ultranest.stepsampler
+import tqdm
+import joblib
+import getdist
+import getdist.plots
+import getdist.chains
+getdist.chains.print_load_details = False
+
+# some helper classes:
+
+
+class DeltaDist(object):
+    """Dirac Delta distribution."""
+
+    # provides compatibility with scipy.stats distributions when a parameter is fixed
+    def __init__(self, value):
+        self.value = value
+
+    def ppf(self, u):
+        return self.value
+
+    def mean(self):
+        return self.value
+
+    def std(self):
+        return 0
+
+
+class FastAttenuation(object):
+    """Context within which the attenuation law reduces computation.
+
+    Per-filter extinctions, and per-component extinction are skipped.
+    """
+    def __enter__(self):
+        BiAttenuationLaw.store_filter_attenuation = False
+        BiAttenuationLaw.store_component_attenuation = False
+
+    def __exit__(self, type, value, traceback):
+        BiAttenuationLaw.store_filter_attenuation = True
+        BiAttenuationLaw.store_component_attenuation = True
+
+# parse command line arguments
+
+
+class HelpfulParser(argparse.ArgumentParser):
+    def error(self, message):
+        sys.stderr.write('error: %s\n' % message)
+        self.print_help()
+        sys.exit(2)
+
+
+parser = HelpfulParser(
+    description=__doc__,
+    epilog="""Johannes Buchner (C) 2013-2023 <johannes.buchner.acad@gmx.com>""",
+    formatter_class=argparse.RawDescriptionHelpFormatter
+)
+
+
+parser.add_argument(
+    '--offset', type=int, default=0,
+    help='row in the input file to begin processing')
+
+parser.add_argument(
+    '--every', type=int, default=1,
+    help='stride in the input file to process (every nth row)')
+
+parser.add_argument(
+    '--cores', type=int, default=-1,
+    help='number of processes to parallelise for (see joblib.Parallel)')
+parser.add_argument(
+    '--num-posterior-samples', type=int, default=50,
+    help='number of posterior samples to analyse in post-processing')
+
+parser.add_argument(
+    '--plot', action='store_true',
+    help='also make plots of the SED and parameter constraints')
+parser.add_argument(
+    '--mass-max', type=float, default=15,
+    help='Maximum stellar mass.')
+parser.add_argument(
+    '--sfr-max', type=float, default=100000,
+    help='Maximum SFR, averaged over the last 100Myrs, in Msun/yr.')
+parser.add_argument(
+    '--randomize', action='store_true',
+    help='Randomize order in which to analyse observations.')
+
+parser.add_argument(
+    'action', type=str, default='analyse', choices=('analyse', 'generate-from-prior', 'plot-model', 'list-filters'),
+    help='''Mode.
+generate-from-prior: Generate a file with fluxes from randomly drawn model instances.
+plot-model: plot model SED variations.
+list-filters: list the available photometric filters, or
+analyse a photometry file.''')
+
+parser.add_argument(
+    '--sampler', type=str, default='nested-slice', choices=('nested-slice',),
+    help='Parameter space sampling algorithm to use. Nested-slice is recommended.')
+
+
+args = parser.parse_args()
+
+gbl_warehouse = SedWarehouse()
+
+# keeping it called pcigale.ini allows running pcigale with the same file
+# if the user wants to run cigale
 print("parsing pcigale.ini...")
 config = Configuration("pcigale.ini")
 
@@ -131,10 +169,12 @@ data_file = config.configuration['data_file']
 column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
 statistics_config = config.config['statistics']
-# n_cores = int(config.configuration['cores'])
+# receive number of cores from command line
+# configuration describes the model, command line describes how to run
 n_cores = args.cores
 parameter_list = config.configuration['creation_modules_params']
-cache_depth = module_list.index('extinction')
+# limit caching to the first few modules, rest is on-the-fly
+cache_depth = module_list.index('biattenuation')
 cache_depth_to_clear = cache_depth
 if module_list[cache_depth - 1] == 'activatepl':
     cache_depth_to_clear -= 1
@@ -152,18 +192,36 @@ n_variables = len(analysed_variables)
 lim_flag = analysis_module_params["lim_flag"].lower() == "true"
 mock_flag = analysis_module_params["mock_flag"].lower() == "true"
 
+# get statistics configuration
 exponent = int(statistics_config.get('exponent', '2'))
-with_uv_model_uncertainty = statistics_config.get('uv_model_uncertainty', 'false').lower() == 'true'
+with_attenuation_model_uncertainty = statistics_config.get('attenuation_model_uncertainty', 'false').lower() == 'true'
 variability_uncertainty = statistics_config.get('variability_uncertainty', 'true').lower() == 'true'
 systematics_width = float(statistics_config.get('systematics_width', '0.01'))
 
 
+def list_filters():
+    """List all known filters."""
+    with Database() as base:
+        keys, _ = base.get_filter_list()
+        for filter_name in keys:
+            f = base.get_filter(filter_name)
+            print(f)
+
+
+# get list of user-selected filters
 filters = [name for name in column_list if not name.endswith('_err')]
 with Database() as base:
     filters_wl_orig = np.array([base.get_filter(name.rstrip('_')).effective_wavelength for name in filters])
 n_filters = len(filters)
 
-
+# show chosen parameters to the user, in latex file and screen
+latex_table = open('pcigale.ini.tex', 'w')
+latex_table.write(r'  Parameter & Description & Values \\' + "\n")
+latex_table.write(r'  \hline' + "\n")
+latex_table.write(r'  \hline' + "\n")
+latex_table.write(r'  Galaxy components: & & \\' + "\n")
+latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^5$ and $10^{\mathtt{mass\_max}} M_\odot$ \\' + "\n")
+latex_table.write(r'  \texttt{mass\_max} & & %d \\' % (args.mass_max) + "\n")
 param_names = []
 is_log_param = []
 print()
@@ -171,7 +229,10 @@ print("Parameters")
 print("----------")
 for module_name, module_parameters in zip(module_list, parameter_list):
     print("  [%s]" % module_name)
+    latex_table.write("  \\texttt{[%s]} & & \\\\\n" % module_name)
+    module = import_module("." + module_name, 'pcigale.creation_modules')
     for k, v in module_parameters.items():
+        description = module.Module.parameter_list[k][1].split('.')[0]
         if len(v) > 1:
             if min(v) > 0 and max(v) > 0 and max(v) / min(v) > 40:
                 is_log_param.append(True)
@@ -180,28 +241,42 @@ for module_name, module_parameters in zip(module_list, parameter_list):
                 is_log_param.append(False)
                 param_names.append("%s.%s" % (module_name, k))
             print("    %20s : %s" % (k, v), '(log-uniform)' if is_log_param[-1] else '(uniform)')
+            latex_table.write("  \\texttt{%s} & %s & %s %s \\\\\n" % (
+                k.replace('_', '\\_'), description.replace('&', '\\&').replace('_', '\\_'),
+                str(v).replace('[', '').replace(']', ''),
+                '(log-uniform)' if is_log_param[-1] else '(uniform)')
+            )
         else:
             print("    %20s = %s" % (k, v[0]))
+            latex_table.write("  \\texttt{%s} & %s & %s %s \\\\\n" % (
+                k.replace('_', '\\_'), description.replace('&', '\\&').replace('_', '\\_'),
+                v[0], '(fixed)'
+            ))
         del k, v
 
     del module_name, module_parameters
+    latex_table.write(r'  \hline' + "\n")
 print()
+latex_table.write(r'  \hline' + "\n")
+latex_table.close()
 param_names.append("log(stellar_mass)")
 param_names.append("log(L_AGN)")
 param_names.append("redshift")
 param_names.append("systematics")
-rv_systematics = scipy.stats.halfcauchy(scale=systematics_width)
+rv_systematics = scipy.stats.expon(scale=systematics_width)
 
 print("Statistics")
 print("----------")
-print(" Exponent: %d (%s)" % (exponent, {1:'L1',2:'Gaussian'}[exponent]))
+print(" Exponent: %d (%s)" % (exponent, {1: 'L1', 2: 'Gaussian'}[exponent]))
 print(" model uncertainty: ")
-print("    white: half-cauchy width: %s" % systematics_width)
-print("    wavelength-dependent: UV: %s" % with_uv_model_uncertainty)
+print("    white: exponential, scale=%s" % systematics_width)
+print("    attenuation: %s" % with_attenuation_model_uncertainty)
 print("    variability: %s" % variability_uncertainty)
 print()
 
+
 def make_parameter_list(parameters):
+    """Make a parameter list given a array of values, which may be in log."""
     parameter_list_first = []
     i = 0
     for module_parameters in parameter_list:
@@ -219,7 +294,12 @@ def make_parameter_list(parameters):
         parameter_list_first.append(parameter_list_here)
     return parameter_list_first
 
-def get_model_fluxes(sed, filters):
+
+def compute_model_fluxes(sed, filters):
+    """Compute fluxes and derived properties.
+
+    Returns -99 values if the setup is unphysical (star formation before the age of the Universe).
+    """
     if 'sfh.age' in sed.info and sed.info['sfh.age'] > sed.info['universe.age']:
         model_fluxes = -99. * np.ones(len(filters))
         model_variables = -99. * np.ones(len(analysed_variables))
@@ -230,8 +310,16 @@ def get_model_fluxes(sed, filters):
     return model_fluxes, model_variables
 
 
-
 def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
+    """Create the hybrid galaxy & AGN SED.
+
+    Runs the dual pipelines,
+     - one for AGN components with mock galaxy properties
+     - one for galaxy components with mock galaxy properties
+    Then combines the result, with the SED scaled by stellar mass or AGN luminosity.
+
+    Returns the scaled SED, and the unscaled galaxy and AGN SED
+    """
     # get sed for galaxy
     parameter_list_gal = []
     parameter_list_agn = []
@@ -258,60 +346,56 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
         parameter_list_gal.append(parameter_list_gal_here)
         parameter_list_agn.append(parameter_list_agn_here)
 
+    # this clears the cache, if we are in danger of running out of memory (CACHE_MAX environment variable)
     if len(gbl_warehouse.storage.dictionary) > cache_max:
-        if cache_print: print("clearing cache:", len(gbl_warehouse.storage.dictionary))
+        if cache_print:
+            print("clearing cache:", len(gbl_warehouse.storage.dictionary))
         gbl_warehouse.partial_clear_cache(cache_depth_to_clear)
-        if cache_print: print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
+        if cache_print:
+            print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
+    
+    # compute galaxy and AGN SEDs, un-normalised
     sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_gal[:cache_depth])
-    agn_sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_agn[:cache_depth])
+    agn_sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_agn[:cache_depth]).copy()
     assert sed.contribution_names == agn_sed.contribution_names, (sed.contribution_names, agn_sed.contribution_names)
 
+    # select AGN components
     agn_mask = np.array(['activate' in name for name in sed.contribution_names])
-    assert np.isfinite(sed.luminosities).all(), sed.luminosities
-    assert np.isfinite(sed.luminosity).all(), sed.luminosity
 
-    # remember igm attenuation
-    # igm = sed.luminosities[-1] / (sed.luminosity + 1e-100)
-    # assert np.isfinite(igm).all(), igm
-    scaled_sed = sed.copy()
     # scale the AGN and galactic components as needed
+    scaled_sed = sed.copy()
     scaled_sed.luminosities[~agn_mask] *= stellar_mass
-    scaled_sed.info.update({k:v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info})
+    scaled_sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info})
     # convert from erg/s/A at 5100A to erg/s with 5100
     # convert from erg/s to W, the luminosity unit of cigale, with 1e7
-    scaled_sed.luminosities[agn_mask] = agn_sed.luminosities[agn_mask] * L_AGN / 1e7 / 5100
+    agn_sed.luminosities[agn_mask, :] *= L_AGN / 1e7 / 510
+    scaled_sed.luminosities[agn_mask] = agn_sed.luminosities[agn_mask]
+    agn_sed.luminosity = agn_sed.luminosities[agn_mask, :].sum(axis=0)
     # copy over AGN meta data
-    scaled_sed.info.update({k:v * (L_AGN if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
+    scaled_sed.info.update({k: v * (L_AGN if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
+    agn_sed.info.update({k: v * (L_AGN if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
     scaled_sed.luminosity = scaled_sed.luminosities.sum(0)
 
-    # apply the remaining modules
+    # apply the remaining modules (post-caching)
     for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
         module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
         module_instance.process(scaled_sed)
 
-    #print("IGM:", igm.min(), igm.max())
-    assert np.isfinite(scaled_sed.luminosities[:-1].sum(0)).all(), scaled_sed.luminosities[:-1].sum(0)
-    # recompute IGM attenuation
-    #scaled_sed.luminosities[-1] = igm * scaled_sed.luminosities[:-1].sum(0)
-    assert np.isfinite(scaled_sed.luminosities).all(), scaled_sed.luminosities
-    
-    # update total luminosities
-    assert np.isfinite(scaled_sed.luminosity).all(), scaled_sed.luminosity
     return scaled_sed, sed, agn_sed
+
 
 # Wavelength limits (restframe) when plotting the best SED.
 PLOT_L_MIN = 0.1
 PLOT_L_MAX = 50
 
-def with_attenuation(keys):
-    return keys + ['attenuation.' + key for key in keys]
 
 def plot_posteriors(filename, prior_samples, param_names, samples):
+    """Make plot of parameter posteriors compared to prior."""
     print("plotting posteriors ...")
     plt.figure(figsize=(12, 12))
     for i, (param_name, samples) in enumerate(zip(param_names, samples.transpose())):
         plt.subplot(4, len(param_names) // 4 + 1, i + 1)
-        bins = np.unique(list(set(prior_samples[:,i]).union(set(samples))))
+        bins = np.unique(list(set(prior_samples[:, i]).union(set(samples))))
         if not np.isfinite(bins).all():
             print("WARNING: parameter %s is bad, remove it from the analysis list" % param_name)
         if len(bins) > 2 and bins[-1] > bins[-2]:
@@ -322,90 +406,95 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
             plt.hist(samples, histtype='step', density=True, bins=bins)
         xlo, xhi = plt.xlim()
         with np.errstate(invalid='ignore', divide='ignore'):
-            plt.hist(prior_samples[:,i], histtype='step', 
+            plt.hist(
+                prior_samples[:, i], histtype='step',
                 density=True, bins=bins, color='gray', ls='-')
         plt.xlim(xlo, xhi)
         plt.yticks([])
         plt.xlabel(param_names[i])
-    
+
     plt.subplots_adjust(wspace=0.1)
     plt.savefig(filename, bbox_inches='tight')
     plt.close()
 
+
+def _with_attenuation(keys):
+    return keys + ['attenuation.' + key for key in keys]
+
+
+# groups of SED contributions to include in the fit
 plot_elements = [
-    dict(keys=with_attenuation(['stellar.young', 'stellar.old']),
-         label="Stellar attenuated", color='orange', marker=None, linestyle='-',),
-    #dict(keys=['stellar.young', 'stellar.old'],
-    #     label="Stellar unattenuated", color='b', marker=None, nonposy='clip', linestyle='--', linewidth=0.5),
-    dict(keys=with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
+    dict(keys=_with_attenuation(['stellar.young', 'stellar.old']),
+         label="Stellar (attenuated)", color='orange', marker=None, linestyle='-',),
+    # dict(keys=['stellar.young', 'stellar.old'],
+    #      label="Stellar (unattenuated)", color='b', marker=None, nonposy='clip', linestyle='--', linewidth=0.5),
+    dict(keys=_with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
          label="Nebular emission", color='y', marker=None, linewidth=.5),
-    dict(keys=with_attenuation(['agn.activate_Disk']),
+    dict(keys=_with_attenuation(['agn.activate_Disk']),
          label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
-    dict(keys=with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
+    dict(keys=_with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
          label="AGN torus", color=[0.90, 0.77, 0.42], marker=None, linestyle='-', linewidth=1.5),
-    dict(keys=with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_EmLines_LINER']),
+    dict(keys=_with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_EmLines_LINER']),
          label="AGN lines", color=[0.90, 0.50, 0.21], marker=None, linestyle='-', linewidth=0.5),
     dict(keys=['dust'], label="Dust", color='darkred', marker=None, linestyle='-', linewidth=0.5),
-    #dict(keys=['F_lambda_total'],
-    #     label="Model spectrum", color='k', marker=None, nonposy='clip', linestyle='-', linewidth=1.5, alpha=0.7),
 ]
 
+
 def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot):
+    """Make all the plots."""
+
     # only allow the main process to plot
     if not sampler.log:
         return
 
     results = sampler.results
+    Z = results['logz']
     plot_dir = sampler.logs['plots']
     assert np.isfinite(results['samples']).all()
-    
+
+    # avoid replotting if nothing changed and all the files are there
     if not replot and all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'derived', 'sed_mJy', 'sed_lum', 'corner'))):
         print("not replotting.")
         return
+
     plot_posteriors('%s/posteriors.pdf' % plot_dir, prior_samples, param_names, results['samples'])
+
     print("making corner plot ...")
     smooth_samples = sampler.results['samples'].copy()
-    #smooth_prior_samples = prior_samples.copy()
     for i in range(len(param_names)):
-        bins = np.unique(prior_samples[:,i]).tolist()
+        bins = np.unique(prior_samples[:, i]).tolist()
         if len(bins) < 40:
             if len(bins) == 1:
                 db = 1
             else:
                 db = (bins[-1] - bins[-2])
             for lo, hi in zip(bins, bins[1:] + [bins[-1] + db]):
-                mask = smooth_samples[:,i] == lo
-                smooth_samples[mask,i] = np.random.uniform(lo, hi, size=mask.sum())
-                mask2 = prior_samples[:,i] == lo
-                #smooth_prior_samples[mask2,i] = np.random.uniform(lo, hi, size=mask2.sum())
+                mask = smooth_samples[:, i] == lo
+                smooth_samples[mask, i] = np.random.uniform(lo, hi, size=mask.sum())
+                mask2 = prior_samples[:, i] == lo
+
     samples = getdist.MCSamples(
         samples=smooth_samples, names=param_names, sampler='nested',
         settings=dict(smooth_scale_2D=0.3, smooth_scale_1D=0.3))
-    #samples2 = getdist.MCSamples(
-    #    samples=smooth_prior_samples, names=param_names, sampler='nested',
-    #    settings=dict(smooth_scale_2D=0.3, smooth_scale_1D=0.3))
     g = getdist.plots.get_subplot_plotter()
     g.triangle_plot([samples])
-    #corner.corner(smooth_samples, labels=param_names, show_titles=True, bins=10)
-    for handler in logging.root.handlers[:]: 
-         logging.root.removeHandler(handler)
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
     plt.savefig('%s/corner.pdf' % plot_dir)
     plt.close()
 
     print("making SED instances ...")
-    bands = {'lum':{}, 'mJy':{}}
-    
+    bands = {'lum': {}, 'mJy': {}}
+
     z = obs['redshift']
-    # chi2_best = -2 * sampler.results['weighted_samples']['logl'].max()
-    # chi2_reduced = chi2_best / wobs.sum()
     chi2_best = 1e300
-    
+
     posteriors_names = analysed_variables + ['NEV', 'Lbol', 'chi2']
     posteriors = []
     all_mod_fluxes = []
     obs_filter_wavelength = filters_wl_orig[wobs]
-    
-    for parameters in tqdm.tqdm(sampler.results['samples'][:50,:]):
+
+    for parameters in tqdm.tqdm(sampler.results['samples'][:args.num_posterior_samples, :]):
         stellar_mass = 10**parameters[-4]
         L_AGN = 10**parameters[-3]
         redshift = parameters[-2]
@@ -415,25 +504,35 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
-        model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
 
+        Lbol = compute_Lbol(agn_sed)
+        NEV = compute_NEV(Lbol)
+
+        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
             module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
             module_instance.process(agn_sed)
 
-        agn_model_fluxes_full, _ = get_model_fluxes(agn_sed, filters)
+        agn_model_fluxes_full, _ = compute_model_fluxes(agn_sed, filters)
         agn_model_fluxes = agn_model_fluxes_full[wobs]
-
-        NEV, Lbol = compute_NEV(L_AGN)
 
         mod_fluxes = model_fluxes_full[wobs]
         all_mod_fluxes.append(model_fluxes_full)
 
-        _, chi2_0 = chi2_with_norm(mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, obs_filter_wavelength * np.inf, redshift, sys_error*0+0.1, NEV, exponent=exponent)
+        filter_wl_indices = np.searchsorted(sed.wavelength_grid, filters_wl_orig[wobs])
+        filter_contrib = sed.luminosities[:, filter_wl_indices]
+        filter_pos_contrib = np.where(filter_contrib > 0, filter_contrib, 0).sum(axis=0)
+        transmitted_fraction = filter_contrib.sum(axis=0) / filter_pos_contrib
+
+        _, chi2_0, _ = chi2_with_norm(
+            mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, obs_filter_wavelength * np.inf, redshift, sys_error * 0,
+            NEV=NEV, exponent=exponent, transmitted_fraction=transmitted_fraction * 0 + 1)
         chi2_best = min(chi2_0, chi2_best)
-        norm, chi2_ = chi2_with_norm(mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, exponent=exponent)
-        posteriors.append(np.concatenate((np.log10(model_variables), [NEV, Lbol, chi2_])))
-        
+        norm, chi2_, total_variance = chi2_with_norm(
+            mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error,
+            NEV, exponent=exponent, transmitted_fraction=transmitted_fraction)
+        posteriors.append(np.concatenate((np.log10(model_variables), [NEV, np.log10(Lbol), chi2_])))
+
         wavelength_spec = sed.wavelength_grid
         DL = sed.info['universe.luminosity_distance']
 
@@ -472,17 +571,16 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     print("selected:", posteriors_names)
     plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, np.array(posteriors))
     np.savetxt('%s/derived.csv' % plot_dir, posteriors, header=','.join(posteriors_names), comments='', delimiter=',')
-    
+
     print("write out flux predictions ...")
     all_mod_fluxes = np.array(all_mod_fluxes)
     mod_fluxes = np.median(all_mod_fluxes, axis=0)[wobs]
-    #mod_fluxes = np.median(all_mod_fluxes[:,wobs], axis=0)
     with open('%s/fluxpredict.csv' % plot_dir, 'w') as fflux:
         fflux.write('filtername,flux,flux_err\n')
         for filtername, filterpred in zip(filters, all_mod_fluxes.transpose()):
             fflux.write('%s,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred)))
 
-    print("write out sed ...")
+    print("write out SED as csv files ...")
     for sed_type in 'mJy', 'lum':
         header = ['wavelength']
         seddata = [wavelength_spec2]
@@ -506,7 +604,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         # wsed = np.where((wavelength_spec2 > xmin) & (wavelength_spec2 < xmax))
 
         figure = plt.figure()
-        gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1])
+        gs = gridspec.GridSpec(2, 1, height_ratios=[4, 1], hspace=0.02)
 
         ax1 = plt.subplot(gs[0])
         ax2 = plt.subplot(gs[1])
@@ -517,37 +615,41 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         for j, plot_element in enumerate(plot_elements):
             if j in bands[sed_type]:
                 print("  plotting", sed_type, plot_element['label'], np.shape(bands[sed_type][j].ys))
-                bands[sed_type][j].shade(0.45, color=plot_element['color'], 
-                    #label=plot_element['label'] % sed.info, 
-                    alpha=0.1)
+                bands[sed_type][j].shade(0.45, color=plot_element['color'], alpha=0.1)
                 line_kwargs = dict(plot_element)
                 del line_kwargs['keys']
                 bands[sed_type][j].line(**line_kwargs)
 
         if sed_type == 'lum':
+            # shift back from observed-frame to rest-frame units:
             xmin = PLOT_L_MIN / (1 + z)
             xmax = PLOT_L_MAX / (1 + z)
 
             filters_wl /= 1. + z
-            k_corr_SED = 1e-29 * (4.*np.pi*DL*DL) * c / (filters_wl*1e-9) / 1000
+            k_corr_SED = 1e-29 * (4. * np.pi * DL * DL) * c / (filters_wl * 1e-9) / 1000
             obs_fluxes = obs_fluxes * k_corr_SED
             obs_fluxes_err = obs_errors * k_corr_SED
             mod_fluxes = mod_fluxes * k_corr_SED
+            mod_fluxes_err = total_variance**0.5 * k_corr_SED
         elif sed_type == 'mJy':
             xmin = PLOT_L_MIN
             xmax = PLOT_L_MAX
 
             k_corr_SED = 1.
             obs_fluxes_err = obs_errors
+            mod_fluxes_err = total_variance**0.5
 
         ax1.set_autoscale_on(False)
         ax1.scatter(filters_wl, mod_fluxes, marker='o', color='r', s=8,
                     zorder=3, label="Model fluxes")
         mask_ok = np.logical_and(obs_fluxes > 0., obs_errors > 0.)
         ax1.errorbar(filters_wl[mask_ok], obs_fluxes[mask_ok],
-                     yerr=obs_fluxes_err[mask_ok]*3, ls='', marker='s',
+                     yerr=mod_fluxes_err[mask_ok] * 3, ls='',
+                     markersize=6, color='b', capsize=2., elinewidth=1)
+        ax1.errorbar(filters_wl[mask_ok], obs_fluxes[mask_ok],
+                     yerr=obs_fluxes_err[mask_ok] * 3, ls='', marker='s',
                      label='Observed fluxes', markerfacecolor='None',
-                     markersize=6, markeredgecolor='b', capsize=2., elinewidth=1)
+                     markersize=6, color='b', capsize=4., elinewidth=1)
         mask_uplim = np.logical_and(np.logical_and(obs_fluxes > 0.,
                                                obs_fluxes_err < 0.),
                                 obs_fluxes_err > -9990. * k_corr_SED)
@@ -557,7 +659,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
                          yerr=obs_fluxes_err[mask_uplim], ls='',
                          marker='v', label='Observed upper limits',
                          markerfacecolor='None', markersize=6,
-                         markeredgecolor='g', 
+                         markeredgecolor='g',
                          capsize=2, linestyle=' ', elinewidth=1)
         mask_noerr = np.logical_and(obs_fluxes > 0.,
                                     obs_fluxes_err < -9990. * k_corr_SED)
@@ -565,7 +667,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             ax1.errorbar(filters_wl[mask_noerr], obs_fluxes[mask_noerr],
                          ls='', marker='s', markerfacecolor='None',
                          markersize=6, markeredgecolor='r',
-                         label='Observed fluxes, no errors', 
+                         label='Observed fluxes, no errors',
                          capsize=2, linestyle=' ', elinewidth=1)
         mask, = np.where(obs_fluxes > 0.)
         ax2.errorbar(filters_wl[mask],
@@ -589,7 +691,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         if mask_ok.any():
             ymin = min(np.nanmin(obs_fluxes[mask_ok]),
                        np.nanmin(mod_fluxes[mask_ok]))
-            
+
             if not mask_uplim.any() == False:
                 ymax = max(max(np.nanmax(obs_fluxes[mask_ok]),
                                np.nanmax(obs_fluxes[mask_uplim])),
@@ -606,46 +708,73 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         ax1.set_yscale('log')
         ax2.set_ylim(-maxresid, maxresid)
         if sed_type == 'lum':
-            ax2.set_xlabel("Rest-frame wavelength [$\mu$m]")
+            ax2.set_xlabel("Rest-frame wavelength [$\\mu$m]")
             ax1.set_ylabel("Luminosity [W]")
-            ax2.set_ylabel("(Obs-Mod)/Obs")
+            ax2.set_ylabel("(Obs-Mod)/Obs", size=8)
         else:
-            ax2.set_xlabel("Observed wavelength [$\mu$m]")
+            ax2.set_xlabel("Observed wavelength [$\\mu$m]")
             ax1.set_ylabel("Flux [mJy]")
-            ax2.set_ylabel("(Obs-Mod)/Obs")
+            ax2.set_ylabel("(Obs-Mod)/Obs", size=8)
         ax1.legend(fontsize=6, loc='best', fancybox=True, framealpha=0.5)
         plt.setp(ax1.get_xticklabels(), visible=False)
         plt.setp(ax1.get_yticklabels()[1], visible=False)
         figure.suptitle(
-            "Best model for %s at z = %.3f. $\chi^2$=%.1f/%d" %
-                (obs['id'], obs['redshift'], chi2_best, len(obs_fluxes)))
+            "%s at z=%.3f, $\chi^2_{/n}$=%.1f/%d Z=%.1f" %
+            (obs['id'], obs['redshift'], chi2_best, len(obs_fluxes), Z))
         figure.savefig("%s/sed_%s.pdf" % (plot_dir, sed_type))
         plt.close(figure)
 
     return (
         param_names + posteriors_names,
-        np.concatenate((results['samples'].mean(axis=0), np.mean(posteriors, axis=0))), 
+        np.concatenate((results['samples'].mean(axis=0), np.mean(posteriors, axis=0))),
         np.concatenate((results['samples'].std(axis=0), np.std(posteriors, axis=0))),
         np.concatenate((np.quantile(results['samples'], 0.02275, axis=0), np.quantile(posteriors, 0.02275, axis=0))),
         np.concatenate((np.quantile(results['samples'], 0.97725, axis=0), np.quantile(posteriors, 0.97725, axis=0))),
     )
 
-def make_prior_transform(rv_redshift, Linfo=None, num_redshift_points=40):
+
+def make_prior_transform(rv_redshift, Finfo=None, num_redshift_points=40):
+    """Create the prior transform given prior information about the flux or redshift.
+
+    Parameters
+    ----------
+    rv_redshift: scipy.stats random variable
+        prior for redshift
+    Finfo: None or tuple
+        If None, a flat prior on AGN luminosity is assumed
+        If (FAGN, FAGN_errlo, FAGN_errhi) is provided,
+        this describes the log10(erg/s/cm^2 flux) prior and its error bars.
+    num_redshift_points: int
+        Number of discrete points for the redshift parameter.
+
+    Returns
+    -------
+    prior_transform: func
+        Prior transform function
+    """
     redshift_fixed = rv_redshift.std() == 0
-    if Linfo is None:
-        def L_prior_transform(u):
-            # AGN luminosity from 10^38 to 10^50
-            return u * 12 + 38
+
+    # consider flux prior on 5100A luminosity
+    if Finfo is not None:
+        FAGN, FAGN_errlo, FAGN_errhi = Finfo
+        # Sides of the asymmetric gaussian prior on log(flux)
+        rv_F_lo = scipy.stats.norm(FAGN, FAGN_errlo)
+        rv_F_hi = scipy.stats.norm(FAGN, FAGN_errhi)
+
+        def L_prior_transform(u, redshift):
+            # pick the appropriate side
+            rv = rv_F_lo if u < 0.5 else rv_F_hi
+            # convert to flux
+            logF = rv.ppf(u)
+            # convert from erg/s/cm^2 to erg/s
+            logL = logF + np.log10(4 * np.pi) + 2 * np.log10(cosmology.luminosity_distance(redshift).to(u.cm).value)
+            return logL
     else:
-        LAGN, LAGN_errlo, LAGN_errhi = Linfo
-        rv_L_lo = scipy.stats.norm(LAGN, LAGN_errlo)
-        rv_L_hi = scipy.stats.norm(LAGN, LAGN_errhi)
-        def L_prior_transform(u):
-            if u < 0.5:
-                return rv_L_lo.ppf(u)
-            else:
-                return rv_L_hi.ppf(u)
-    
+        def L_prior_transform(u, z):
+            # AGN luminosity from 10^38 to 10^50
+            del z
+            return u * 12 + 38
+
     def prior_transform(cube):
         params = np.empty(len(cube) + (1 if redshift_fixed else 0)) + np.nan
         i = 0
@@ -656,37 +785,41 @@ def make_prior_transform(rv_redshift, Linfo=None, num_redshift_points=40):
                     if is_log_param[i]:
                         params[i] = log10(params[i])
                     i += 1
-        
+
         # stellar mass from 10^5 to 10^15
         params[i] = cube[i] * (args.mass_max - 5) + 5
-        
-        # AGN luminosity from 10^30 to 10^50
-        params[i+1] = L_prior_transform(cube[i+1])
-        # * 20 + 30
 
-        # redshift. 
-        # params[i+1] = rv_redshift.ppf(cube[i+1])
+        # redshift.
         # Approximate redshift with points on the CDF
-        params[i + 2] = rv_redshift.ppf((1 + np.round(cube[i+2] * num_redshift_points)) / (num_redshift_points+2))
+        params[i + 2] = rv_redshift.ppf((1 + np.round(cube[i + 2] * num_redshift_points)) / (num_redshift_points + 2))
+
+        # AGN luminosity from 10^30 to 10^50
+        params[i + 1] = L_prior_transform(cube[i + 1], params[i + 2])
+
         j = i + 2 if redshift_fixed else i + 3
-        
+
         # systematic uncertainty
         params[i + 3] = rv_systematics.ppf(cube[j])
         return params
     return prior_transform
 
+
 def plot_model():
+    """Vary each model parameter and show its effect as plots.
+
+    This also saves the plot elements as machine-readable csv files.
+    """
     umid = np.array([1e-6 if 'E(B-V)' in p else 0.5 for p in param_names])
     redshift = 1.0
     for logL_AGN in [44, 38, 46, 42]:
         L_AGN = 10**logL_AGN
-        rv_redshift = scipy.stats.uniform(redshift, redshift+1e-3)
+        rv_redshift = scipy.stats.uniform(redshift, redshift + 1e-3)
         prior_transform = make_prior_transform(rv_redshift)
         print("reference values:")
         for p, v in zip(param_names, prior_transform(umid)):
             print("   %-20s: %s" % (p, v))
         cache_filters = {}
-        
+
         for i, p in enumerate(param_names):
             if p in ('redshift', 'log(L_AGN)', 'activate.AGNtype', 'systematics'):
                 continue
@@ -696,9 +829,8 @@ def plot_model():
             for AGNtype in 1, 2, 3:
                 last_value = np.nan
                 plt.figure(figsize=(12, 6))
-                filename = 'modelspectrum_L%d_type%s_%s' % (logL_AGN, AGNtype, p.replace('(','').replace(')',''))
+                filename = 'modelspectrum_L%d_type%s_%s' % (logL_AGN, AGNtype, p.replace('(', '').replace(')', ''))
                 first_legend = None
-                #total_lines = []
                 for v in np.linspace(0.001, 0.999, 11):
                     u[i] = v
                     parameters = prior_transform(u)
@@ -708,18 +840,19 @@ def plot_model():
                         continue
                     last_value = parameters[i]
                     stellar_mass = 10**parameters[-4]
-                    
+
                     parameter_list_here = make_parameter_list(parameters)
                     assert module_list[-1] == 'redshifting'
                     parameter_list_here[-1] = dict(redshift=redshift)
-                    
+
                     with np.errstate(invalid='ignore'):
-                        sed, _, _ = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+                        sed, _, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
                     sed.cache_filters = cache_filters
 
-                    _, model_variables = get_model_fluxes(sed, filters)
-                    NEV, Lbol = compute_NEV(L_AGN)
-                    
+                    _, model_variables = compute_model_fluxes(sed, filters)
+                    Lbol = compute_Lbol(agn_sed)
+                    NEV = compute_NEV(Lbol)
+
                     wavelength_spec = sed.wavelength_grid.copy()
                     wavelength_spec /= 1. + redshift
                     DL = sed.info['universe.luminosity_distance']
@@ -737,25 +870,25 @@ def plot_model():
                         if not any(k in sed.contribution_names for k in keys):
                             # print("skipping", plot_element['label'], 'because need', keys, "have only some:", [k in sed.contribution_names for k in keys])
                             continue
-                        
+
                         pred = sum(sed.get_lumin_contribution(k) * sed_multiplier for k in keys if k in sed.contribution_names)
-                        
+
                         line_kwargs = dict(plot_element)
                         del line_kwargs['keys']
                         line_kwargs['alpha'] = alpha
                         plt.plot(wavelength_spec[mask], pred[mask], **line_kwargs)
                         outputs.append(pred)
                         output_labels.append(plot_element['label'])
-                    
+
                     line, = plt.plot(wavelength_spec[mask], (sed.luminosity * sed_multiplier)[mask], '-', color='k', alpha=alpha, label='total')
                     subfilename = filename + '_at%s' % (parameters[i])
-                    np.savetxt(subfilename + '.params',
+                    np.savetxt(
+                        subfilename + '.params',
                         [np.concatenate((parameters, model_variables, [NEV, Lbol]))],
                         delimiter=',', header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'])
                     )
-                    assert len(outputs)==len(output_labels), (np.shape(outputs), len(output_labels))
-                    np.savetxt(subfilename + '.txt', np.transpose(outputs), delimiter=',', header=','.join(output_labels), comments='')
-                    
+                    np.savetxt(subfilename + '.csv', np.transpose(outputs), delimiter=',', header=','.join(output_labels), comments='')
+
                     if first_legend is None:
                         first_legend = plt.legend(title='Components', framealpha=0.5, loc='upper left')
                 plt.gca().add_artist(first_legend)
@@ -767,19 +900,13 @@ def plot_model():
                 plt.xlim(PLOT_L_MIN, PLOT_L_MAX)
                 plt.title(p)
                 plt.ylim(1e34, 1e39)
-                
+
                 plt.savefig(filename + '.png', bbox_inches='tight')
                 plt.close()
 
-def list_filters():
-    with Database() as base:
-        keys, _ = base.get_filter_list()
-        for filter_name in keys:
-            f = base.get_filter(filter_name)
-            print(f)
-
 
 def generate_fluxes(Ngen=100000):
+    """Generate random SEDs from the configuration and save the fluxes."""
     rv_redshift = scipy.stats.uniform(0, 6)
     prior_transform = make_prior_transform(rv_redshift)
     cache_filters = {}
@@ -795,12 +922,13 @@ def generate_fluxes(Ngen=100000):
         parameter_list_here = make_parameter_list(parameters)
         assert module_list[-1] == 'redshifting'
         parameter_list_here[-1] = dict(redshift=redshift)
-        
-        NEV, Lbol = compute_NEV(L_AGN)
-        sed, _, _ = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+
+        sed, _, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+        Lbol = compute_Lbol(agn_sed)
+        NEV = compute_NEV(Lbol)
         sed.cache_filters = cache_filters
 
-        model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
+        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
         fluxdata[i][:len(param_names)] = parameters
         fluxdata[i][len(param_names):len(param_names + analysed_variables)] = model_variables
         fluxdata[i][len(param_names + analysed_variables)] = NEV
@@ -809,10 +937,45 @@ def generate_fluxes(Ngen=100000):
         assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
 
     np.savetxt(
-        "model_fluxes.txt.gz", fluxdata, delimiter=',', comments='',
+        "model_fluxes.csv.gz", fluxdata, delimiter=',', comments='',
         header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'] + filters))
 
-def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, exponent=2):
+def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, transmitted_fraction, exponent=2):
+    """Likelihood considering all variance contributions.
+
+    Parameters
+    ----------
+    model_fluxes: array
+        list of SED fluxes
+    model_fluxes: array
+        list of SED fluxes from the AGN components alone
+    obs_fluxes: array
+        list of measured fluxes
+    obs_errors: array
+        uncertainties for obs_fluxes
+    obs_filter_wavelength: array
+        observed-frame wavelength of the filters
+    redshift: float
+        Redshift
+    sys_error: float
+        fractional systematic error to apply
+    NEV: float
+        normalised excess variance to consider on AGN components due to variability
+    transmitted_fraction: array
+        for each filter, the fraction of flux transmitted through any attenuation.
+        This is the ratio of flux to the flux if there was no attenuation.
+    exponent: float
+        2 for Gaussian statistics (L2), 1 for exponential statistics (L1) being more permissive to outliers
+
+    Returns
+    -------
+    norm: float
+        logarithm of Gaussian likelihood normalisation factor
+    chi2: float
+        "chi-square", i.e., the -0.5 times the Gaussian likelihood exponential factor
+    total_variance: array
+        total variance from all contributions (data, variability, model uncertainties)
+    """
     # Some observations may not have flux values in some filter(s), but
     # they can have upper limit(s). To process upper limits, the user
     # is asked to put the upper limit as flux value and an error value with
@@ -832,27 +995,44 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
     # i.e., when (obs_flux is >=0. (and obs_errors>=-9990., obs_errors<0.))
     # and lim_flag=True
     mask_lim = np.logical_and(obs_errors >= -9990., obs_errors < TOLERANCE)
-    
-    # variance from observation, according to the reported errors
+
+    # (1) variance from observation, according to the reported errors
     obs_variance = obs_errors[mask_data]**2
-    # variance from year-to-year variability (Simm+ paper)
+
+    # (2) variance from year-to-year variability (Simm+ paper)
     if variability_uncertainty:
         var_variance = NEV * agn_model_fluxes**2
     else:
         var_variance = 0.0
-    # variance from model systematic uncertainties
+
+    # (3) variance from model systematic uncertainties
     sys_variance = (sys_error * agn_model_fluxes)**2
-    if with_uv_model_uncertainty:
-        # UV model error
-        rest_filter_wavelength = obs_filter_wavelength / (1 + redshift)
-        sys_variance[rest_filter_wavelength < 125] = 1e16
-        #sys_variance += (4 * (rest_filter_wavelength / 91.0)**-4 * model_fluxes)**2
-        # print(np.array(list(zip(filters, obs_filter_wavelength, rest_filter_wavelength, sys_variance))))
+
+    if with_attenuation_model_uncertainty:
+        # (3b) attenuation model error
+        # map transmitted fraction (from 1..0.1..0.01 [0..1..2]) to standard deviation (0..0.01..0.01)
+        transmitted_fraction[transmitted_fraction < 1e-4] = 1e-4
+        transmitted_fraction[transmitted_fraction > 1.0] = 1.0
+        neg_log_transmitted = -np.log10(transmitted_fraction + 1e-4)
+        # powerlaw increase from 0->1e-4 to 1->0.01  (2->1)
+        log_uncertainty_fraction = -4 + 2 * neg_log_transmitted
+        # but threshold at 1%
+        log_uncertainty_fraction[log_uncertainty_fraction > -2] = -2
+        # this is the uncertainty relative to the unattenuated spectrum
+        # since we apply to total fluxes, we need to correct it upwards.
+        attenuation_uncertainty = 10**log_uncertainty_fraction / transmitted_fraction
+        # print("attenuation model uncertainties:", transmitted_fraction, 10**log_uncertainty_fraction, attenuation_uncertainty)
+        # apply as a fraction of total model fluxes
+        sys_variance += (attenuation_uncertainty * model_fluxes)**2
+    del obs_filter_wavelength
+    del redshift
+
     # combined variance in each filter
     total_variance = obs_variance + sys_variance + var_variance
 
+    # compute chi^2 and the Gaussian likelihood normalisation
     chi2_ = np.sum(
-        ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)**(exponent/2.0) )
+        ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)**(exponent/2.0))
     norm = 0.5 * np.log(2 * np.pi * total_variance**(exponent/2.0)).sum()
 
     if mask_lim.any():
@@ -862,35 +1042,83 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
                     1.+erf(
                         (obs_fluxes[mask_lim]-model_fluxes[mask_lim]) /
                         (np.sqrt(2)*(uplim_errors))))).sum()
-    return norm, chi2_
+    return norm, chi2_, total_variance
 
-def compute_NEV(L_AGN):
-    # from Netzer+19 bolometric corrections
-    Lbol = L_AGN * 40 * (L_AGN / 1e42)**-0.2
+
+def compute_Lbol(agn_sed):
+    """Compute bolometric AGN luminosity in erg/s."""
+    wavelength = agn_sed.wavelength_grid
+    Lbol = np.trapz(y=agn_sed.luminosity, x=wavelength)
+    # Lbol_opt = np.trapz(y=agn_sed.luminosity[wavelength < 1000], x=wavelength[wavelength < 1000])
+    # Lbol_IR = np.trapz(y=agn_sed.luminosity[wavelength > 1000], x=wavelength[wavelength > 1000])
+    # print("bol_corr_factor", Lbol / L_AGN * 1e7, Lbol_opt / L_AGN * 1e7, Lbol_IR / L_AGN * 1e7)
+    return Lbol * 1e7
+
+
+def compute_NEV(Lbol):
+    """Compute normalised excess variance.
+
+    from Simm+16 Table 3 empirical relation.
+    """
     # from Simm+16 Table 3: normalised excess variance as a function of Lbol
     # NEV = min(0.1, 10**(-1.43 - 0.74 * np.log10(Lbol / 1e45)))
     NEV = min(0.1, 10**(-1.43 - 0.74 * np.log10(Lbol / 1e45)))
     # print('L5100=%.1e  Lbol=%.1e  var=%.4f' % (L_AGN, Lbol, NEV))
-    return NEV, Lbol
+    return NEV
+
 
 def analyse_obs_wrapper(samplername, obs, plot=True):
-    # new source, so start fresh
-    gbl_warehouse.partial_clear_cache(0)
-    import gc; gc.collect()
-    #np.random.seed(1)
+    """Wrapper catching crashes to continue with the next source.
+
+    When analysing large samples with large machines, it can be annoying if
+    an analysis fails due to file locking or files being deleted etc.
+    This allows continuing the run with the next source,
+    and later reprocessing the entire sample.
+    """
     try:
         return analyse_obs(samplername, obs, plot=plot)
     except OSError as e:
-        print("skipping, probably analysed on another machine. error was: %s" % e)
+        print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
     except RuntimeError as e:
-        print("skipping, probably analysed on another machine. error was: %s" % e)
+        print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
     except BlockingIOError as e:
-        print("skipping, probably analysed on another machine. error was: %s" % e)
+        print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
+        return obs['id'], None, None
+    except np.linalg.LinAlgError as e:
+        print("skipping '%s', probably not enough data points. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
 
+
 def analyse_obs(samplername, obs, plot=True):
+    """Source fitting.
+
+    Parameters
+    ----------
+    obs: dict
+        Observation table row (id, redshift, etc)
+    plot: bool
+        whether to produce plots
+    samplername: str
+        which fitting algorithm to run.
+        MCMC, optimization, MLFriends were supported in a previous version
+        but are inefficient or get stuck.
+        samplername='nested-slice' is the only currently supported and works well.
+        It runs nested sampling with MLFriends initially, then switches over to
+        slice sampling.
+
+    Returns
+    -------
+    id: str
+        source id
+    results: array
+        list of fitting result values. May be None if analysis failed.
+    results_string: str
+        same as results, but converted to a string. Can be present even if results is None.
+    """
+    assert samplername == 'nested-slice'
+
     redshift_mean = obs['redshift']
     num_redshift_points = 40
     if samplername.startswith('nested') and ('redshift_err' not in obs.colnames or 0<=obs['redshift_err']<=0.001):
@@ -925,20 +1153,23 @@ def analyse_obs(samplername, obs, plot=True):
     print()
     print("Source:", obs['id'], "Redshift:", rv_redshift.mean(), rv_redshift.std())
     print()
-    if 'LAGN' in obs.keys() and 'LAGN_errlo' in obs.keys() and 'LAGN_errhi' in obs.keys():
-        Linfo = (obs['LAGN'], obs['LAGN_errlo'], obs['LAGN_errhi']) 
-        print("Using X-ray luminosity constraint:", Linfo)
-    elif 'LAGN' in obs.keys() and 'LAGN_err' in obs.keys():
-        Linfo = (obs['LAGN'], obs['LAGN_err'], obs['LAGN_err'])
-        print("Using X-ray luminosity constraint:", Linfo)
+    if 'FAGN' in obs.keys() and 'FAGN_errlo' in obs.keys() and 'FAGN_errhi' in obs.keys():
+        Finfo = (obs['FAGN'], obs['FAGN_errlo'], obs['FAGN_errhi'])
+        print("Using AGN flux constraint:", Finfo)
+    elif 'FAGN' in obs.keys() and 'FAGN_err' in obs.keys():
+        Finfo = (obs['FAGN'], obs['FAGN_err'], obs['FAGN_err'])
+        print("Using AGN flux constraint:", Finfo)
     else:
-        Linfo = None
-    
-    prior_transform = make_prior_transform(rv_redshift, Linfo, num_redshift_points=num_redshift_points)
-    
+        Finfo = None
+
+    prior_transform = make_prior_transform(rv_redshift, Finfo=Finfo, num_redshift_points=num_redshift_points)
+
     prior_samples = np.asarray([prior_transform(u) for u in np.random.uniform(size=(10000, len(active_param_names)))])
     assert np.isfinite(prior_samples[0]).all(), (prior_samples[0])
-    assert np.isfinite(prior_samples).all(), (np.where(~np.isfinite(prior_samples).all(axis=0)), np.where(~np.isfinite(prior_samples).all(axis=1)), prior_samples[~np.isfinite(prior_samples)])
+    assert np.isfinite(prior_samples).all(), (
+        np.where(~np.isfinite(prior_samples).all(axis=0)),
+        np.where(~np.isfinite(prior_samples).all(axis=1)),
+        prior_samples[~np.isfinite(prior_samples)])
 
     # select the filters from the list of active filters
 
@@ -949,15 +1180,18 @@ def analyse_obs(samplername, obs, plot=True):
     obs_fluxes = obs_fluxes_full[wobs]
     obs_errors = obs_errors_full[wobs]
     obs_filter_wavelength = filters_wl_orig[wobs]
-    #if not np.logical_and(obs_fluxes_full > 0, obs_errors_full > 0).any():
-    #    print("ERROR: Source does not have detections, skipping")
-    #    return obs['id'], None, None
 
     cache_filters = {}
-    
+
     def loglikelihood(parameters):
+        """Fitting likelihood function"""
+
+        # if we are called with the same values again, return what we just computed
+        # this can happen because the parameters are binned
         if loglikelihood.last_parameters is not None and np.all(loglikelihood.last_parameters == parameters):
             return loglikelihood.last_loglikelihood
+
+        # get the normalisation parameters
         stellar_mass = 10**parameters[-4]
         L_AGN = 10**parameters[-3]
         redshift = parameters[-2]
@@ -965,135 +1199,89 @@ def analyse_obs(samplername, obs, plot=True):
         parameter_list_here = make_parameter_list(parameters)
         assert module_list[-1] == 'redshifting'
         parameter_list_here[-1] = dict(redshift=redshift)
-        
+
+        # compute SED
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
 
-        model_fluxes_full, model_variables = get_model_fluxes(sed, filters)
+        Lbol = compute_Lbol(agn_sed)
+        NEV = compute_NEV(Lbol)
+
+        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
+        sfr = model_variables[analysed_variables.index('sfh.sfr100Myrs')]
+        if not 0 <= sfr <= args.sfr_max:
+            # excluded by exceeding age of Universe
+            logl = -1e100
+            loglikelihood.last_parameters = parameters
+            loglikelihood.last_loglikelihood = logl
+            return logl
 
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
             module_instance = creation_modules.get_module(module_name, **module_parameters)
             module_instance.process(agn_sed)
 
-        agn_model_fluxes_full, _ = get_model_fluxes(agn_sed, filters)
+        agn_model_fluxes_full, _ = compute_model_fluxes(agn_sed, filters)
         agn_model_fluxes = agn_model_fluxes_full[wobs]
-
         model_fluxes = model_fluxes_full[wobs]
-        
-        NEV, Lbol = compute_NEV(L_AGN)
 
-        # get unobscured luminosities at filter wavelengths
-        # agn_sed.luminosities[:-1].sum(0)
-        
-        norm, chi2_ = chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, exponent=exponent)
-        
+        # get fraction of non-attenuated flux at the filters
+        filter_wl_indices = np.searchsorted(sed.wavelength_grid, filters_wl_orig[wobs])
+        filter_contrib = sed.luminosities[:, filter_wl_indices]
+        filter_pos_contrib = np.where(filter_contrib > 0, filter_contrib, 0).sum(axis=0)
+        transmitted_fraction = filter_contrib.sum(axis=0) / filter_pos_contrib
+
+        # compute likelihood:
+        norm, chi2_, _ = chi2_with_norm(
+            model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, 
+            exponent=exponent, transmitted_fraction=transmitted_fraction)
+
         logl = -0.5 * chi2_ - norm
+        # for a Gaussian(0,1) prior on log10(SFR), add
+        # logl += -0.5 * (np.log10(sfr + 1e-4))**2
         loglikelihood.last_parameters = parameters
         loglikelihood.last_loglikelihood = logl
         return logl
     loglikelihood.last_parameters = None
     loglikelihood.last_loglikelihood = None
 
-    outdir = "dualanalysis_%s_var%s%s%d" % (
+    outdir = "grahsp_%s_var%s%s%d" % (
         str(obs['id']).strip(),
         'V' if variability_uncertainty else '',
-        'U' if with_uv_model_uncertainty else '',
+        'A' if with_attenuation_model_uncertainty else '',
         -int(np.log10(systematics_width)),
     )
     if args.mass_max != 15:
         outdir += "_maxgal%d" % args.mass_max
-    print("Sampling with sampler:", samplername)
+
     replot = not os.path.exists(outdir + '/analysis_results.txt')
     results = None
-    # print("  free parameters:", active_param_names, derived_param_names)
-    if samplername == 'laplace':
-        from snowline import ReactiveImportanceSampler
-        print("Laplace approximation ...")
-        sampler = ReactiveImportanceSampler(param_names, loglikelihood, prior_transform)
-        # sampler.run(num_global_samples=1000, max_improvement_loops=1)
-        sampler.laplace_approximate(num_global_samples=1000)
-        sampler.cov = np.eye(len(param_names)) * 0.04
-        sampler.invcov = np.linalg.inv(sampler.cov)
-        # sampler.init_globally(num_global_samples=1000)
-        for sampling_results in sampler.run_iter(
-            num_gauss_samples=1000,
-            min_ess=1000,
-            max_improvement_loops=5,
-        ):
-            print("Importance sampling ...")
-            sampler.print_results()
-            np.savetxt(
-                outdir + '_laplace.txt.gz', sampling_results['samples'], 
-                delimiter=',', comments='', header=','.join(param_names)
-            )
-            if plot and not os.path.exists(outdir + '_laplace.pdf'):
-                results = plot_posteriors(outdir + '_laplace.pdf', prior_samples, param_names, sampling_results['samples'])
-    elif samplername == 'mcmc':
-        from autoemcee import ReactiveAffineInvariantSampler
-        with FastExtinction():
-            sampler = ReactiveAffineInvariantSampler(param_names, loglikelihood, prior_transform)
-            sampler.run()
-            sampler.print_results()
-        np.savetxt(
-            outdir + '_mcmc.txt.gz', sampler.results['samples'], 
-            delimiter=',', comments='', header=','.join(param_names)
+    with FastAttenuation():
+        try:
+            sampler = ReactiveNestedSampler(
+                active_param_names, loglikelihood, prior_transform,
+                log_dir=outdir, resume='resume', derived_param_names=derived_param_names)
+        except Exception as e:
+            print("WARNING: could not resume because of %s. overwriting." % e)
+            os.unlink(outdir + '/results/points.hdf5')
+            # previous results are invalid, so start from scratch
+            replot = True
+            sampler = ReactiveNestedSampler(
+                active_param_names, loglikelihood, prior_transform,
+                log_dir=outdir, resume='overwrite', derived_param_names=derived_param_names)
+        print("  running without step sampler ...")
+        sampler_args = dict(
+            frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, 
+            dlogz=10, min_ess=100, cluster_num_live_points=0, viz_callback=None
         )
-        if plot and not os.path.exists(outdir + '_mcmc.pdf'):
-            results = plot_posteriors(outdir + '_mcmc.pdf', prior_samples, param_names, sampler.results['samples'])
-    elif samplername == 'nested':
-        with FastExtinction():
-            sampler = ReactiveNestedSampler(
-                active_param_names, loglikelihood, prior_transform,
-                log_dir=outdir, resume=True, derived_param_names=derived_param_names)
-            sampler.run(frac_remain=0.9, max_num_improvement_loops=0, min_num_live_points=400, viz_callback=None)
-            sampler.print_results()
-        if plot:
-            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
-        sampler.pointstore.close()
-    elif samplername == 'nested-reactive':
-        with FastExtinction():
-            sampler = ReactiveNestedSampler(
-                active_param_names, loglikelihood, prior_transform,
-                log_dir=outdir, resume=True, derived_param_names=derived_param_names)
-            sampler.run(frac_remain=0.5, max_num_improvement_loops=5, min_num_live_points=50, min_ess=500, dlogz=10, cluster_num_live_points=0)
-            sampler.print_results()
-        if plot:
-            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
-        sampler.pointstore.close()
-    elif samplername == 'nested-slice':
-        outdir += "-slice"
-        replot = not os.path.exists(outdir + '/analysis_results.txt')
-        with FastExtinction():
-            try:
-                sampler = ReactiveNestedSampler(
-                    active_param_names, loglikelihood, prior_transform,
-                    log_dir=outdir, resume='resume', derived_param_names=derived_param_names)
-            except Exception as e:
-                print("WARNING: could not resume because of %s. overwriting." % e)
-                os.unlink(outdir + '/results/points.hdf5')
-                # previous results are invalid, so start from scratch
-                replot = True
-                sampler = ReactiveNestedSampler(
-                    active_param_names, loglikelihood, prior_transform,
-                    log_dir=outdir, resume='overwrite', derived_param_names=derived_param_names)
-            import ultranest.stepsampler
-            print("run without step sampler ...")
-            sampler.run(frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, max_ncalls=10000, viz_callback=None)
-            print("run with step sampler ...")
-            sampler.stepsampler = ultranest.stepsampler.SliceSampler(nsteps=20,
-                generate_direction=ultranest.stepsampler.generate_mixture_random_direction)
-            sampler.run(
-                frac_remain=0.5, min_num_live_points=50, dlogz=10, cluster_num_live_points=0, 
-                min_ess=100, viz_callback=None, max_num_improvement_loops=0,
-            )
-            sampler.print_results()
-        if plot:
-            results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
-        sampler.pointstore.close()
-    elif samplername == 'noop':
-        pass
-    else:
-        raise ValueError("Unknown sampler: '%s'" % samplername)
+        sampler.run(max_ncalls=10000, **sampler_args)
+        print("  running with step sampler ...")
+        sampler.stepsampler = ultranest.stepsampler.SliceSampler(
+            nsteps=20, generate_direction=ultranest.stepsampler.generate_mixture_random_direction)
+        sampler.run(**sampler_args)
+        sampler.print_results()
+    if plot:
+        results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
+    sampler.pointstore.close()
     if results is not None:
         names, means, stds, los, his = results
         with open(outdir + '/analysis_results.txt', 'w') as fout:
@@ -1105,10 +1293,13 @@ def analyse_obs(samplername, obs, plot=True):
         results_string = open(outdir + '/analysis_results.txt', 'r').read()
     except IOError:
         results_string = None
-    
+
+    print("  results stored in %s" % outdir)
     return obs['id'], results, results_string
 
+
 def main():
+    """Script entry point, calls function depending on the mode."""
     if args.action == 'generate-from-prior':
         generate_fluxes()
     elif args.action == 'list-filters':
@@ -1122,13 +1313,13 @@ def main():
         obs_table = complete_obs_table(read_table(data_file), column_list,
                                        filters, TOLERANCE, lim_flag)
 
-        # pick observation
+        # pick observations to analyse in this process
         obs_table_here = obs_table[args.offset::args.every]
         indices = np.arange(len(obs_table_here))
         if args.randomize:
             np.random.shuffle(indices)
         fout = None
-        # analyse 20 observations in parallel, then reset children
+        # analyse some observations in parallel, then reset children
         # this is to avoid excessive memory use (there is a memory leak).
         for i in np.array_split(indices, max(1, len(obs_table_here) // chunk_size)):
             print("processing chunk with indices:", i)
@@ -1140,7 +1331,6 @@ def main():
                 if results_string is None:
                     print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
                     continue
-                print("result", id, result)
                 names = param_names + analysed_variables + ['NEV', 'Lbol', 'chi2']
                 if fout is None:
                     fout = open(data_file + '_analysis_results.txt', 'w')
@@ -1151,9 +1341,8 @@ def main():
                 fout.write(results_string)
                 fout.flush()
 
-        #for obs in obs_table:
-        #    analyse_obs(samplername, obs, plot=plot)
         print("analying %d observations done." % len(obs_table_here))
+
 
 if __name__ == '__main__':
     main()
