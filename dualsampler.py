@@ -32,6 +32,7 @@ with a systematic scatter of +-0.43 dex (Koss+2017).
 
 import os
 import sys
+import gc
 import argparse
 import numpy as np
 from numpy import log, log10
@@ -53,7 +54,8 @@ from pcigale import creation_modules
 from pcigale.analysis_modules.pdf_analysis import TOLERANCE
 from pcigale.data import Database
 from pcigale.creation_modules.biattenuation import BiAttenuationLaw
-from pcigale.creation_modules.redshifting import cosmology
+import astropy.cosmology
+import pcigale.creation_modules.redshifting
 
 from ultranest import ReactiveNestedSampler
 from ultranest.plot import PredictionBand
@@ -165,6 +167,13 @@ gbl_warehouse = SedWarehouse()
 print("parsing pcigale.ini...")
 config = Configuration("pcigale.ini")
 
+cosmo_string = config.config.get('cosmology', 'concordance')
+if cosmo_string != 'concordance':
+    if not hasattr(astropy.cosmology, cosmo_string):
+        print("ERROR: cosmology must be set to one of: concordance, " + ', '.join(astropy.cosmology.realizations.available))
+    pcigale.creation_modules.redshifting.cosmology = getattr(astropy.cosmology, cosmo_string)
+cosmology = pcigale.creation_modules.redshifting.cosmology
+
 data_file = config.configuration['data_file']
 column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
@@ -273,7 +282,8 @@ print("    white: exponential, scale=%s" % systematics_width)
 print("    attenuation: %s" % with_attenuation_model_uncertainty)
 print("    variability: %s" % variability_uncertainty)
 print()
-
+print("Cosmology:", cosmology)
+print()
 
 def make_parameter_list(parameters):
     """Make a parameter list given a array of values, which may be in log."""
@@ -492,6 +502,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     posteriors_names = analysed_variables + ['NEV', 'Lbol', 'chi2']
     posteriors = []
     all_mod_fluxes = []
+    agn_mod_fluxes = []
+    gal_mod_fluxes = []
     obs_filter_wavelength = filters_wl_orig[wobs]
 
     for parameters in tqdm.tqdm(sampler.results['samples'][:args.num_posterior_samples, :]):
@@ -518,6 +530,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         mod_fluxes = model_fluxes_full[wobs]
         all_mod_fluxes.append(model_fluxes_full)
+        agn_mod_fluxes.append(agn_model_fluxes_full)
+        gal_mod_fluxes.append(model_fluxes_full - agn_model_fluxes_full)
 
         filter_wl_indices = np.searchsorted(sed.wavelength_grid, filters_wl_orig[wobs])
         filter_contrib = sed.luminosities[:, filter_wl_indices]
@@ -574,11 +588,13 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
     print("write out flux predictions ...")
     all_mod_fluxes = np.array(all_mod_fluxes)
+    agn_mod_fluxes = np.array(agn_mod_fluxes)
+    gal_mod_fluxes = np.array(gal_mod_fluxes)
     mod_fluxes = np.median(all_mod_fluxes, axis=0)[wobs]
     with open('%s/fluxpredict.csv' % plot_dir, 'w') as fflux:
-        fflux.write('filtername,flux,flux_err\n')
-        for filtername, filterpred in zip(filters, all_mod_fluxes.transpose()):
-            fflux.write('%s,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred)))
+        fflux.write('filtername,flux,flux_err,flux_agn,flux_agn_err,flux_gal,flux_gal_err\n')
+        for filtername, filterpred, filterpred_agn, filterpred_gal in zip(filters, all_mod_fluxes.transpose(), agn_mod_fluxes.transpose(), gal_mod_fluxes.transpose()):
+            fflux.write('%s,%g,%g,%g,%g,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred), np.mean(filterpred), np.std(filterpred), np.mean(filterpred), np.std(filterpred)))
 
     print("write out SED as csv files ...")
     for sed_type in 'mJy', 'lum':
@@ -1067,6 +1083,93 @@ def compute_NEV(Lbol):
     return NEV
 
 
+class ModelLikelihood(object):
+    """
+    Likelihood function, which also knows about the observational data.
+    
+    Parameters
+    ----------
+    wobs: list of bool
+        which filters are active
+    obs_fluxes: list
+        observed flux values
+    obs_errors: list
+        uncertainties for obs_fluxes
+    obs_filter_wavelength: list
+        observed_frame wavelength of each filter
+    """
+
+    def __init__(self, wobs, obs_fluxes, obs_errors, obs_filter_wavelength):
+        self.cache_filters = {}
+        self.last_parameters = None
+        self.wobs = wobs
+        self.obs_fluxes = obs_fluxes
+        self.obs_errors = obs_errors
+        self.obs_filter_wavelength = obs_filter_wavelength
+        self.last_loglikelihood = None
+
+    def __call__(self, parameters):
+        """Fitting likelihood function"""
+
+        # if we are called with the same values again, return what we just computed
+        # this can happen because the parameters are binned
+        if self.last_parameters is not None and np.all(self.last_parameters == parameters):
+            return self.last_loglikelihood
+
+        # get the normalisation parameters
+        stellar_mass = 10**parameters[-4]
+        L_AGN = 10**parameters[-3]
+        redshift = parameters[-2]
+        sys_error = parameters[-1]
+        parameter_list_here = make_parameter_list(parameters)
+        assert module_list[-1] == 'redshifting'
+        parameter_list_here[-1] = dict(redshift=redshift)
+
+        # compute SED
+        sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+        sed.cache_filters = self.cache_filters
+
+        Lbol = compute_Lbol(agn_sed)
+        NEV = compute_NEV(Lbol)
+
+        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
+        sfr = model_variables[analysed_variables.index('sfh.sfr100Myrs')]
+        if not 0 <= sfr <= args.sfr_max:
+            # excluded by exceeding age of Universe
+            logl = -1e20
+            self.last_parameters = parameters
+            self.last_loglikelihood = logl
+            return logl
+
+        for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
+            module_instance = creation_modules.get_module(module_name, **module_parameters)
+            module_instance.process(agn_sed)
+
+        agn_model_fluxes_full, _ = compute_model_fluxes(agn_sed, filters)
+        agn_model_fluxes = agn_model_fluxes_full[self.wobs]
+        model_fluxes = model_fluxes_full[self.wobs]
+
+        # get fraction of non-attenuated flux at the filters
+        filter_wl_indices = np.searchsorted(sed.wavelength_grid, filters_wl_orig[self.wobs])
+        filter_contrib = sed.luminosities[:, filter_wl_indices]
+        filter_pos_contrib = np.where(filter_contrib > 0, filter_contrib, 0).sum(axis=0)
+        transmitted_fraction = filter_contrib.sum(axis=0) / filter_pos_contrib
+
+        # compute likelihood:
+        norm, chi2_, _ = chi2_with_norm(
+            model_fluxes, agn_model_fluxes, self.obs_fluxes, self.obs_errors, 
+            self.obs_filter_wavelength, redshift, sys_error, NEV, 
+            exponent=exponent, transmitted_fraction=transmitted_fraction)
+
+        logl = -0.5 * chi2_ - norm
+        # for a Gaussian(0,1) prior on log10(SFR), add
+        # logl += -0.5 * (np.log10(sfr + 1e-4))**2
+        self.last_parameters = parameters
+        self.last_loglikelihood = logl
+        return logl
+
+
+
 def analyse_obs_wrapper(samplername, obs, plot=True):
     """Wrapper catching crashes to continue with the next source.
 
@@ -1075,6 +1178,8 @@ def analyse_obs_wrapper(samplername, obs, plot=True):
     This allows continuing the run with the next source,
     and later reprocessing the entire sample.
     """
+    gbl_warehouse.partial_clear_cache(0)
+    gc.collect()
     try:
         return analyse_obs(samplername, obs, plot=plot)
     except OSError as e:
@@ -1180,69 +1285,8 @@ def analyse_obs(samplername, obs, plot=True):
     obs_fluxes = obs_fluxes_full[wobs]
     obs_errors = obs_errors_full[wobs]
     obs_filter_wavelength = filters_wl_orig[wobs]
-
-    cache_filters = {}
-
-    def loglikelihood(parameters):
-        """Fitting likelihood function"""
-
-        # if we are called with the same values again, return what we just computed
-        # this can happen because the parameters are binned
-        if loglikelihood.last_parameters is not None and np.all(loglikelihood.last_parameters == parameters):
-            return loglikelihood.last_loglikelihood
-
-        # get the normalisation parameters
-        stellar_mass = 10**parameters[-4]
-        L_AGN = 10**parameters[-3]
-        redshift = parameters[-2]
-        sys_error = parameters[-1]
-        parameter_list_here = make_parameter_list(parameters)
-        assert module_list[-1] == 'redshifting'
-        parameter_list_here[-1] = dict(redshift=redshift)
-
-        # compute SED
-        sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
-        sed.cache_filters = cache_filters
-
-        Lbol = compute_Lbol(agn_sed)
-        NEV = compute_NEV(Lbol)
-
-        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
-        sfr = model_variables[analysed_variables.index('sfh.sfr100Myrs')]
-        if not 0 <= sfr <= args.sfr_max:
-            # excluded by exceeding age of Universe
-            logl = -1e100
-            loglikelihood.last_parameters = parameters
-            loglikelihood.last_loglikelihood = logl
-            return logl
-
-        for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
-            module_instance = creation_modules.get_module(module_name, **module_parameters)
-            module_instance.process(agn_sed)
-
-        agn_model_fluxes_full, _ = compute_model_fluxes(agn_sed, filters)
-        agn_model_fluxes = agn_model_fluxes_full[wobs]
-        model_fluxes = model_fluxes_full[wobs]
-
-        # get fraction of non-attenuated flux at the filters
-        filter_wl_indices = np.searchsorted(sed.wavelength_grid, filters_wl_orig[wobs])
-        filter_contrib = sed.luminosities[:, filter_wl_indices]
-        filter_pos_contrib = np.where(filter_contrib > 0, filter_contrib, 0).sum(axis=0)
-        transmitted_fraction = filter_contrib.sum(axis=0) / filter_pos_contrib
-
-        # compute likelihood:
-        norm, chi2_, _ = chi2_with_norm(
-            model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, 
-            exponent=exponent, transmitted_fraction=transmitted_fraction)
-
-        logl = -0.5 * chi2_ - norm
-        # for a Gaussian(0,1) prior on log10(SFR), add
-        # logl += -0.5 * (np.log10(sfr + 1e-4))**2
-        loglikelihood.last_parameters = parameters
-        loglikelihood.last_loglikelihood = logl
-        return logl
-    loglikelihood.last_parameters = None
-    loglikelihood.last_loglikelihood = None
+    
+    loglikelihood = ModelLikelihood(wobs, obs_fluxes, obs_errors, obs_filter_wavelength)
 
     outdir = "grahsp_%s_var%s%s%d" % (
         str(obs['id']).strip(),
@@ -1280,7 +1324,9 @@ def analyse_obs(samplername, obs, plot=True):
         sampler.run(**sampler_args)
         sampler.print_results()
     if plot:
-        results = plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot=replot)
+        results = plot_results(
+            sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, 
+            loglikelihood.cache_filters, replot=replot)
     sampler.pointstore.close()
     if results is not None:
         names, means, stds, los, his = results

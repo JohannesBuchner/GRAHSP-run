@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 sed = SED()
 sfh = creation_modules.get_module(
-    'sfhdelayed', tau_main=1000, age_main=1000, sfr_A=1, normalise="True")
+    'sfhdelayed', tau_main=100, age_main=200, sfr_A=1, normalise="True")
 sfh.process(sed)
 
 bc03 = creation_modules.get_module(
