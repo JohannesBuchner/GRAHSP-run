@@ -499,7 +499,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     z = obs['redshift']
     chi2_best = 1e300
 
-    posteriors_names = analysed_variables + ['NEV', 'Lbol', 'chi2']
+    posteriors_names = analysed_variables + ['NEV', 'logLbolBBB', 'logLbolTOR', 'chi2']
     posteriors = []
     all_mod_fluxes = []
     agn_mod_fluxes = []
@@ -517,7 +517,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
 
-        Lbol = compute_Lbol(agn_sed)
+        Lbol = compute_Lbol_BBB(agn_sed)
+        Lbol_torus = compute_Lbol_torus(agn_sed)
         NEV = compute_NEV(Lbol)
 
         model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
@@ -545,7 +546,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         norm, chi2_, total_variance = chi2_with_norm(
             mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error,
             NEV, exponent=exponent, transmitted_fraction=transmitted_fraction)
-        posteriors.append(np.concatenate((np.log10(model_variables), [NEV, np.log10(Lbol), chi2_])))
+        posteriors.append(np.concatenate((np.log10(model_variables), [NEV, np.log10(Lbol), np.log10(Lbol_torus), chi2_])))
 
         wavelength_spec = sed.wavelength_grid
         DL = sed.info['universe.luminosity_distance']
@@ -866,7 +867,8 @@ def plot_model():
                     sed.cache_filters = cache_filters
 
                     _, model_variables = compute_model_fluxes(sed, filters)
-                    Lbol = compute_Lbol(agn_sed)
+                    Lbol = compute_Lbol_BBB(agn_sed)
+                    Lbol_torus = compute_Lbol_torus(agn_sed)
                     NEV = compute_NEV(Lbol)
 
                     wavelength_spec = sed.wavelength_grid.copy()
@@ -900,8 +902,8 @@ def plot_model():
                     subfilename = filename + '_at%s' % (parameters[i])
                     np.savetxt(
                         subfilename + '.params',
-                        [np.concatenate((parameters, model_variables, [NEV, Lbol]))],
-                        delimiter=',', header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'])
+                        [np.concatenate((parameters, model_variables, [NEV, Lbol, Lbol_torus]))],
+                        delimiter=',', header=','.join(param_names + analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR'])
                     )
                     np.savetxt(subfilename + '.csv', np.transpose(outputs), delimiter=',', header=','.join(output_labels), comments='')
 
@@ -940,7 +942,7 @@ def generate_fluxes(Ngen=100000):
         parameter_list_here[-1] = dict(redshift=redshift)
 
         sed, _, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
-        Lbol = compute_Lbol(agn_sed)
+        Lbol = compute_Lbol_BBB(agn_sed)
         NEV = compute_NEV(Lbol)
         sed.cache_filters = cache_filters
 
@@ -1061,13 +1063,26 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
     return norm, chi2_, total_variance
 
 
-def compute_Lbol(agn_sed):
-    """Compute bolometric AGN luminosity in erg/s."""
+def compute_Lbol_BBB(agn_sed):
+    """Compute bolometric AGN luminosity in erg/s.
+    
+    Using all AGN components except for the torus
+    integrate from 91.2nm upwards.
+    """
     wavelength = agn_sed.wavelength_grid
-    Lbol = np.trapz(y=agn_sed.luminosity, x=wavelength)
-    # Lbol_opt = np.trapz(y=agn_sed.luminosity[wavelength < 1000], x=wavelength[wavelength < 1000])
-    # Lbol_IR = np.trapz(y=agn_sed.luminosity[wavelength > 1000], x=wavelength[wavelength > 1000])
-    # print("bol_corr_factor", Lbol / L_AGN * 1e7, Lbol_opt / L_AGN * 1e7, Lbol_IR / L_AGN * 1e7)
+    wave_mask = wavelength > 91.1753
+    agn_mask = np.array(['activate' in name and 'Torus' not in name for name in agn_sed.contribution_names])
+    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=1)
+    Lbol = np.trapz(y=luminosity[wave_mask], x=wavelength[wave_mask])
+    return Lbol * 1e7
+
+
+def compute_Lbol_torus(agn_sed):
+    """Compute bolometric torus luminosity in erg/s."""
+    wavelength = agn_sed.wavelength_grid
+    agn_mask = np.array(['activate' in name and 'Torus' in name for name in agn_sed.contribution_names])
+    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=1)
+    Lbol = np.trapz(y=luminosity, x=wavelength)
     return Lbol * 1e7
 
 
@@ -1129,7 +1144,7 @@ class ModelLikelihood(object):
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = self.cache_filters
 
-        Lbol = compute_Lbol(agn_sed)
+        Lbol = compute_Lbol_BBB(agn_sed)
         NEV = compute_NEV(Lbol)
 
         model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
