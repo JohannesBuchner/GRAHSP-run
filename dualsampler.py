@@ -1072,7 +1072,7 @@ def compute_Lbol_BBB(agn_sed):
     wavelength = agn_sed.wavelength_grid
     wave_mask = wavelength > 91.1753
     agn_mask = np.array(['activate' in name and 'Torus' not in name for name in agn_sed.contribution_names])
-    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=1)
+    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=0)
     Lbol = np.trapz(y=luminosity[wave_mask], x=wavelength[wave_mask])
     return Lbol * 1e7
 
@@ -1081,7 +1081,7 @@ def compute_Lbol_torus(agn_sed):
     """Compute bolometric torus luminosity in erg/s."""
     wavelength = agn_sed.wavelength_grid
     agn_mask = np.array(['activate' in name and 'Torus' in name for name in agn_sed.contribution_names])
-    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=1)
+    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=0)
     Lbol = np.trapz(y=luminosity, x=wavelength)
     return Lbol * 1e7
 
@@ -1392,7 +1392,7 @@ def main():
                 if results_string is None:
                     print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
                     continue
-                names = param_names + analysed_variables + ['NEV', 'Lbol', 'chi2']
+                names = param_names + analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
                 if fout is None:
                     fout = open(data_file + '_analysis_results.txt', 'w')
                     fout.write('# id')
