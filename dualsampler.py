@@ -32,7 +32,6 @@ with a systematic scatter of +-0.43 dex (Koss+2017).
 
 import os
 import sys
-import gc
 import argparse
 import numpy as np
 from numpy import log, log10
@@ -958,6 +957,7 @@ def generate_fluxes(Ngen=100000):
         "model_fluxes.csv.gz", fluxdata, delimiter=',', comments='',
         header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'] + filters))
 
+
 def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, transmitted_fraction, exponent=2):
     """Likelihood considering all variance contributions.
 
@@ -1186,33 +1186,6 @@ class ModelLikelihood(object):
         self.last_loglikelihood = logl
         return logl
 
-import tracemalloc
-import linecache
-from pympler.tracker import SummaryTracker
-
-def display_top(snapshot, key_type='lineno', limit=10):
-    snapshot = snapshot.filter_traces((
-        tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
-        tracemalloc.Filter(False, "<unknown>"),
-    ))
-    top_stats = snapshot.statistics(key_type)
-
-    print("Top %s lines" % limit)
-    for index, stat in enumerate(top_stats[:limit], 1):
-        frame = stat.traceback[0]
-        print("#%s: %s:%s: %.1f KiB"
-              % (index, frame.filename, frame.lineno, stat.size / 1024))
-        line = linecache.getline(frame.filename, frame.lineno).strip()
-        if line:
-            print('    %s' % line)
-
-    other = top_stats[limit:]
-    if other:
-        size = sum(stat.size for stat in other)
-        print("%s other: %.1f KiB" % (len(other), size / 1024))
-    total = sum(stat.size for stat in top_stats)
-    print("Total allocated size: %.1f KiB" % (total / 1024))
-
 
 def analyse_obs_wrapper(args):
     """Wrapper catching crashes to continue with the next source.
@@ -1223,14 +1196,8 @@ def analyse_obs_wrapper(args):
     and later reprocessing the entire sample.
     """
     samplername, obs, plot = args
-    tracemalloc.start()
-    tracker = SummaryTracker()
     try:
-        result = analyse_obs(samplername, obs, plot=plot)
-        snapshot = tracemalloc.take_snapshot()
-        display_top(snapshot)
-        tracker.print_diff()
-        return result
+        return analyse_obs(samplername, obs, plot=plot)
     except OSError as e:
         print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
