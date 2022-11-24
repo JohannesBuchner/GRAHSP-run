@@ -39,6 +39,7 @@ from numpy import log, log10
 from math import erf
 import logging
 from importlib import import_module
+import multiprocessing
 
 import scipy.stats
 from scipy.constants import c
@@ -61,7 +62,6 @@ from ultranest import ReactiveNestedSampler
 from ultranest.plot import PredictionBand
 import ultranest.stepsampler
 import tqdm
-import joblib
 import getdist
 import getdist.plots
 import getdist.chains
@@ -1143,6 +1143,7 @@ class ModelLikelihood(object):
         # compute SED
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = self.cache_filters
+        agn_sed.cache_filters = self.cache_filters
 
         Lbol = compute_Lbol_BBB(agn_sed)
         NEV = compute_NEV(Lbol)
@@ -1151,7 +1152,9 @@ class ModelLikelihood(object):
         sfr = model_variables[analysed_variables.index('sfh.sfr100Myrs')]
         if not 0 <= sfr <= args.sfr_max:
             # excluded by exceeding age of Universe
-            logl = -1e20
+            # assign lower number for those further away from the constraints
+            logl = -1e20 * (np.log10(stellar_mass) + abs(sfr) + max(0, sed.info['sfh.age'] - sed.info['universe.age']))
+            #print("violation", (0, sfr, args.sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
             self.last_parameters = parameters
             self.last_loglikelihood = logl
             return logl
@@ -1183,9 +1186,35 @@ class ModelLikelihood(object):
         self.last_loglikelihood = logl
         return logl
 
+import tracemalloc
+import linecache
+from pympler.tracker import SummaryTracker
+
+def display_top(snapshot, key_type='lineno', limit=10):
+    snapshot = snapshot.filter_traces((
+        tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
+        tracemalloc.Filter(False, "<unknown>"),
+    ))
+    top_stats = snapshot.statistics(key_type)
+
+    print("Top %s lines" % limit)
+    for index, stat in enumerate(top_stats[:limit], 1):
+        frame = stat.traceback[0]
+        print("#%s: %s:%s: %.1f KiB"
+              % (index, frame.filename, frame.lineno, stat.size / 1024))
+        line = linecache.getline(frame.filename, frame.lineno).strip()
+        if line:
+            print('    %s' % line)
+
+    other = top_stats[limit:]
+    if other:
+        size = sum(stat.size for stat in other)
+        print("%s other: %.1f KiB" % (len(other), size / 1024))
+    total = sum(stat.size for stat in top_stats)
+    print("Total allocated size: %.1f KiB" % (total / 1024))
 
 
-def analyse_obs_wrapper(samplername, obs, plot=True):
+def analyse_obs_wrapper(args):
     """Wrapper catching crashes to continue with the next source.
 
     When analysing large samples with large machines, it can be annoying if
@@ -1193,10 +1222,15 @@ def analyse_obs_wrapper(samplername, obs, plot=True):
     This allows continuing the run with the next source,
     and later reprocessing the entire sample.
     """
-    gbl_warehouse.partial_clear_cache(0)
-    gc.collect()
+    samplername, obs, plot = args
+    tracemalloc.start()
+    tracker = SummaryTracker()
     try:
-        return analyse_obs(samplername, obs, plot=plot)
+        result = analyse_obs(samplername, obs, plot=plot)
+        snapshot = tracemalloc.take_snapshot()
+        display_top(snapshot)
+        tracker.print_diff()
+        return result
     except OSError as e:
         print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
@@ -1380,14 +1414,16 @@ def main():
         if args.randomize:
             np.random.shuffle(indices)
         fout = None
-        # analyse some observations in parallel, then reset children
-        # this is to avoid excessive memory use (there is a memory leak).
-        for i in np.array_split(indices, max(1, len(obs_table_here) // chunk_size)):
-            print("processing chunk with indices:", i)
-            allresults = joblib.Parallel(n_jobs=args.cores)(
-                joblib.delayed(analyse_obs_wrapper)(args.sampler, obs, plot)
-                for obs in obs_table_here[i]
-            )
+        # analyse observations in parallel
+        with multiprocessing.Pool(args.cores) as pool:
+            if args.cores == 1:
+                # to preserve traceback for debugging run in here
+                allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
+            else:
+                # farm out to process pool
+                allresults = pool.imap_unordered(
+                    analyse_obs_wrapper,
+                    ((args.sampler, obs_table_here[i], plot) for i in indices))
             for id, result, results_string in allresults:
                 if results_string is None:
                     print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
