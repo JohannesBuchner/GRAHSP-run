@@ -55,6 +55,7 @@ from pcigale.analysis_modules.pdf_analysis import TOLERANCE
 from pcigale.data import Database
 from pcigale.creation_modules.biattenuation import BiAttenuationLaw
 import astropy.cosmology
+import astropy.units as units
 import pcigale.creation_modules.redshifting
 
 from ultranest import ReactiveNestedSampler
@@ -244,7 +245,7 @@ for module_name, module_parameters in zip(module_list, parameter_list):
         if len(v) > 1:
             if min(v) > 0 and max(v) > 0 and max(v) / min(v) > 40:
                 is_log_param.append(True)
-                param_names.append("log(%s.%s)" % (module_name, k))
+                param_names.append("log_%s_%s" % (module_name, k))
             else:
                 is_log_param.append(False)
                 param_names.append("%s.%s" % (module_name, k))
@@ -267,8 +268,8 @@ for module_name, module_parameters in zip(module_list, parameter_list):
 print()
 latex_table.write(r'  \hline' + "\n")
 latex_table.close()
-param_names.append("log(stellar_mass)")
-param_names.append("log(L_AGN)")
+param_names.append("log_stellar_mass")
+param_names.append("log_L_AGN")
 param_names.append("redshift")
 param_names.append("systematics")
 rv_systematics = scipy.stats.expon(scale=systematics_width)
@@ -362,7 +363,7 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
         gbl_warehouse.partial_clear_cache(cache_depth_to_clear)
         if cache_print:
             print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
-    
+
     # compute galaxy and AGN SEDs, un-normalised
     sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_gal[:cache_depth])
     agn_sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_agn[:cache_depth]).copy()
@@ -594,7 +595,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     with open('%s/fluxpredict.csv' % plot_dir, 'w') as fflux:
         fflux.write('filtername,flux,flux_err,flux_agn,flux_agn_err,flux_gal,flux_gal_err\n')
         for filtername, filterpred, filterpred_agn, filterpred_gal in zip(filters, all_mod_fluxes.transpose(), agn_mod_fluxes.transpose(), gal_mod_fluxes.transpose()):
-            fflux.write('%s,%g,%g,%g,%g,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred), np.mean(filterpred), np.std(filterpred), np.mean(filterpred), np.std(filterpred)))
+            fflux.write('%s,%g,%g,%g,%g,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred), np.mean(filterpred_agn), np.std(filterpred_agn), np.mean(filterpred_gal), np.std(filterpred_gal)))
 
     print("write out SED as csv files ...")
     for sed_type in 'mJy', 'lum':
@@ -746,6 +747,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         np.concatenate((results['samples'].std(axis=0), np.std(posteriors, axis=0))),
         np.concatenate((np.quantile(results['samples'], 0.02275, axis=0), np.quantile(posteriors, 0.02275, axis=0))),
         np.concatenate((np.quantile(results['samples'], 0.97725, axis=0), np.quantile(posteriors, 0.97725, axis=0))),
+        np.concatenate((np.median(results['samples'], axis=0), np.median(posteriors, axis=0))),
+        np.concatenate((np.log(np.exp(results['samples']).mean(axis=0)), np.log(np.exp(posteriors).mean(axis=0)))),
     )
 
 
@@ -783,7 +786,7 @@ def make_prior_transform(rv_redshift, Finfo=None, num_redshift_points=40):
             # convert to flux
             logF = rv.ppf(u)
             # convert from erg/s/cm^2 to erg/s
-            logL = logF + np.log10(4 * np.pi) + 2 * np.log10(cosmology.luminosity_distance(redshift).to(u.cm).value)
+            logL = logF + np.log10(4 * np.pi) + 2 * np.log10((cosmology.luminosity_distance(redshift) / units.cm).to(1))
             return logL
     else:
         def L_prior_transform(u, z):
@@ -837,7 +840,7 @@ def plot_model():
         cache_filters = {}
 
         for i, p in enumerate(param_names):
-            if p in ('redshift', 'log(L_AGN)', 'activate.AGNtype', 'systematics'):
+            if p in ('redshift', 'log_L_AGN', 'activate_AGNtype', 'systematics'):
                 continue
             print("varying", p)
 
@@ -850,8 +853,8 @@ def plot_model():
                 for v in np.linspace(0.001, 0.999, 11):
                     u[i] = v
                     parameters = prior_transform(u)
-                    if 'activate.AGNtype' in param_names:
-                        parameters[param_names.index('activate.AGNtype')] = AGNtype
+                    if 'activate_AGNtype' in param_names:
+                        parameters[param_names.index('activate_AGNtype')] = AGNtype
                     if parameters[i] == last_value:
                         continue
                     last_value = parameters[i]
@@ -1024,7 +1027,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
         var_variance = 0.0
 
     # (3) variance from model systematic uncertainties
-    sys_variance = (sys_error * agn_model_fluxes)**2
+    sys_variance = (sys_error * model_fluxes)**2
 
     if with_attenuation_model_uncertainty:
         # (3b) attenuation model error
@@ -1065,7 +1068,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
 
 def compute_Lbol_BBB(agn_sed):
     """Compute bolometric AGN luminosity in erg/s.
-    
+
     Using all AGN components except for the torus
     integrate from 91.2nm upwards.
     """
@@ -1101,7 +1104,7 @@ def compute_NEV(Lbol):
 class ModelLikelihood(object):
     """
     Likelihood function, which also knows about the observational data.
-    
+
     Parameters
     ----------
     wobs: list of bool
@@ -1175,8 +1178,8 @@ class ModelLikelihood(object):
 
         # compute likelihood:
         norm, chi2_, _ = chi2_with_norm(
-            model_fluxes, agn_model_fluxes, self.obs_fluxes, self.obs_errors, 
-            self.obs_filter_wavelength, redshift, sys_error, NEV, 
+            model_fluxes, agn_model_fluxes, self.obs_fluxes, self.obs_errors,
+            self.obs_filter_wavelength, redshift, sys_error, NEV,
             exponent=exponent, transmitted_fraction=transmitted_fraction)
 
         logl = -0.5 * chi2_ - norm
@@ -1301,7 +1304,7 @@ def analyse_obs(samplername, obs, plot=True):
     obs_fluxes = obs_fluxes_full[wobs]
     obs_errors = obs_errors_full[wobs]
     obs_filter_wavelength = filters_wl_orig[wobs]
-    
+
     loglikelihood = ModelLikelihood(wobs, obs_fluxes, obs_errors, obs_filter_wavelength)
 
     outdir = "grahsp_%s_var%s%s%d" % (
@@ -1330,7 +1333,7 @@ def analyse_obs(samplername, obs, plot=True):
                 log_dir=outdir, resume='overwrite', derived_param_names=derived_param_names)
         print("  running without step sampler ...")
         sampler_args = dict(
-            frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50, 
+            frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50,
             dlogz=10, min_ess=100, cluster_num_live_points=0, viz_callback=None
         )
         sampler.run(max_ncalls=10000, **sampler_args)
@@ -1341,15 +1344,15 @@ def analyse_obs(samplername, obs, plot=True):
         sampler.print_results()
     if plot:
         results = plot_results(
-            sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, 
+            sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs,
             loglikelihood.cache_filters, replot=replot)
     sampler.pointstore.close()
     if results is not None:
-        names, means, stds, los, his = results
+        names, means, stds, los, his, medians, lmeans = results
         with open(outdir + '/analysis_results.txt', 'w') as fout:
             fout.write("%s" % obs['id'])
-            for name, mean, std, lo, hi in zip(names, means, stds, los, his):
-                fout.write("\t%g\t%g\t%g\t%g" % (mean, std, lo, hi))
+            for name, mean, std, lo, hi, med, lmean in zip(names, means, stds, los, his, medians, lmeans):
+                fout.write("\t%g\t%g\t%g\t%g\t%g\t%g" % (mean, std, lo, hi, med, lmean))
             fout.write('\n')
     try:
         results_string = open(outdir + '/analysis_results.txt', 'r').read()
@@ -1400,7 +1403,7 @@ def main():
                     fout = open(data_file + '_analysis_results.txt', 'w')
                     fout.write('# id')
                     for name in names:
-                        fout.write('\t%s_mean\t%s_std\t%s_lo\t%s_hi' % (name, name, name, name))
+                        fout.write('\t%s_mean\t%s_std\t%s_lo\t%s_hi\t%s_med\t%s_lmean' % (name, name, name, name, name, name))
                     fout.write('\n')
                 fout.write(results_string)
                 fout.flush()
