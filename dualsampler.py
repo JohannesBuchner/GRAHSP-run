@@ -188,7 +188,8 @@ cache_depth_to_clear = cache_depth
 if module_list[cache_depth - 1] == 'activatepl':
     cache_depth_to_clear -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
-chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
+#chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
+mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
 if cache_print:
     print("Caching modules:", module_list[:cache_depth], "with %d entries" % cache_max)
@@ -481,7 +482,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             for lo, hi in zip(bins, bins[1:] + [bins[-1] + db]):
                 mask = smooth_samples[:, i] == lo
                 smooth_samples[mask, i] = np.random.uniform(lo, hi, size=mask.sum())
-                mask2 = prior_samples[:, i] == lo
+                #mask2 = prior_samples[:, i] == lo
 
     samples = getdist.MCSamples(
         samples=smooth_samples, names=param_names, sampler='nested',
@@ -499,7 +500,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     z = obs['redshift']
     chi2_best = 1e300
 
-    posteriors_names = analysed_variables + ['NEV', 'logLbolBBB', 'logLbolTOR', 'chi2']
+    posteriors_names = analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
+    stellar_mass_column = []
     posteriors = []
     all_mod_fluxes = []
     agn_mod_fluxes = []
@@ -547,6 +549,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error,
             NEV, exponent=exponent, transmitted_fraction=transmitted_fraction)
         posteriors.append(np.concatenate((np.log10(model_variables), [NEV, np.log10(Lbol), np.log10(Lbol_torus), chi2_])))
+        stellar_mass_column.append(stellar_mass)
 
         wavelength_spec = sed.wavelength_grid
         DL = sed.info['universe.luminosity_distance']
@@ -583,19 +586,27 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     print("SED model components:", ' '.join(sed.contribution_names))
 
     print("SED info available:", ' '.join(sed.info.keys()))
-    print("selected:", posteriors_names)
-    plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, np.array(posteriors))
+    print("selected:", len(posteriors_names), posteriors_names)
+    posteriors = np.array(posteriors)
+    # add specific (normalised by stellar mass) AGN luminosities
+    for i, n in enumerate(list(posteriors_names)):
+        if 'sfh.sfr' in n:
+            print("adding column for", n)
+            posteriors = np.hstack((posteriors, (posteriors[:,i] / stellar_mass_column).reshape((-1,1))))
+            posteriors_names.append('s_' + n)
+        elif 'agn.lum' in n or 'Lbol' in n:
+            print("adding column for", n)
+            posteriors = np.hstack((posteriors, (posteriors[:,i] - np.log10(stellar_mass_column)).reshape((-1,1))))
+            posteriors_names.append('s_' + n)
+    # print("   +specific:", len(posteriors_names), posteriors_names)
+    plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, posteriors)
+    # add model fluxes as output columns
+    posteriors = np.hstack((posteriors, all_mod_fluxes, agn_mod_fluxes, gal_mod_fluxes))
+    posteriors_names += ['totalflux_' + filtername for filtername in filters]
+    posteriors_names += ['AGNflux_' + filtername for filtername in filters]
+    posteriors_names += ['GALflux_' + filtername for filtername in filters]
+    # print("   +fluxes:", len(posteriors_names), posteriors_names)
     np.savetxt('%s/derived.csv' % plot_dir, posteriors, header=','.join(posteriors_names), comments='', delimiter=',')
-
-    print("write out flux predictions ...")
-    all_mod_fluxes = np.array(all_mod_fluxes)
-    agn_mod_fluxes = np.array(agn_mod_fluxes)
-    gal_mod_fluxes = np.array(gal_mod_fluxes)
-    mod_fluxes = np.median(all_mod_fluxes, axis=0)[wobs]
-    with open('%s/fluxpredict.csv' % plot_dir, 'w') as fflux:
-        fflux.write('filtername,flux,flux_err,flux_agn,flux_agn_err,flux_gal,flux_gal_err\n')
-        for filtername, filterpred, filterpred_agn, filterpred_gal in zip(filters, all_mod_fluxes.transpose(), agn_mod_fluxes.transpose(), gal_mod_fluxes.transpose()):
-            fflux.write('%s,%g,%g,%g,%g,%g,%g\n' % (filtername, np.mean(filterpred), np.std(filterpred), np.mean(filterpred_agn), np.std(filterpred_agn), np.mean(filterpred_gal), np.std(filterpred_gal)))
 
     print("write out SED as csv files ...")
     for sed_type in 'mJy', 'lum':
@@ -925,7 +936,7 @@ def plot_model():
                 plt.close()
 
 
-def generate_fluxes(Ngen=100000):
+def generate_fluxes(Ngen=40000):
     """Generate random SEDs from the configuration and save the fluxes."""
     rv_redshift = scipy.stats.uniform(0, 6)
     prior_transform = make_prior_transform(rv_redshift)
@@ -935,6 +946,7 @@ def generate_fluxes(Ngen=100000):
     u = np.random.uniform(size=len(param_names))
     for i in tqdm.trange(Ngen):
         u[np.random.randint(len(param_names))] = np.random.uniform()
+        u[-4:] = np.random.uniform(size=len(u[-4:]))
         parameters = prior_transform(u)
         stellar_mass = 10**parameters[-4]
         L_AGN = 10**parameters[-3]
@@ -1385,7 +1397,7 @@ def main():
             np.random.shuffle(indices)
         fout = None
         # analyse observations in parallel
-        with multiprocessing.Pool(args.cores) as pool:
+        with mp_ctx.Pool(args.cores, maxtasksperchild=3) as pool:
             if args.cores == 1:
                 # to preserve traceback for debugging run in here
                 allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
@@ -1398,7 +1410,12 @@ def main():
                 if results_string is None:
                     print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
                     continue
-                names = param_names + analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
+                derived_names = analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
+                names = param_names + derived_names
+                names += ['s_' + n for n in derived_names if 'sfh.sfr' in n or 'agn.lum' in n or 'Lbol' in n]
+                names += ['totalflux_' + filtername for filtername in filters]
+                names += ['AGNflux_' + filtername for filtername in filters]
+                names += ['GALflux_' + filtername for filtername in filters]
                 if fout is None:
                     fout = open(data_file + '_analysis_results.txt', 'w')
                     fout.write('# id')
