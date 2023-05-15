@@ -56,6 +56,7 @@ from pcigale.data import Database
 from pcigale.creation_modules.biattenuation import BiAttenuationLaw
 import astropy.cosmology
 import astropy.units as units
+from astropy.table import Table
 import pcigale.creation_modules.redshifting
 
 from ultranest import ReactiveNestedSampler
@@ -185,6 +186,8 @@ parameter_list = config.configuration['creation_modules_params']
 # limit caching to the first few modules, rest is on-the-fly
 cache_depth = module_list.index('biattenuation')
 cache_depth_to_clear = cache_depth
+if module_list[cache_depth - 1] == 'activatebol':
+    cache_depth_to_clear -= 1
 if module_list[cache_depth - 1] == 'activatepl':
     cache_depth_to_clear -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
@@ -500,7 +503,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     z = obs['redshift']
     chi2_best = 1e300
 
-    posteriors_names = analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
+    posteriors_names = analysed_variables + ['chi2']
     stellar_mass_column = []
     posteriors = []
     all_mod_fluxes = []
@@ -518,10 +521,6 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
-
-        Lbol = compute_Lbol_BBB(agn_sed)
-        Lbol_torus = compute_Lbol_torus(agn_sed)
-        NEV = compute_NEV(Lbol)
 
         model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
@@ -543,12 +542,12 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         _, chi2_0, _ = chi2_with_norm(
             mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, obs_filter_wavelength * np.inf, redshift, sys_error * 0,
-            NEV=NEV, exponent=exponent, transmitted_fraction=transmitted_fraction * 0 + 1)
+            NEV=sed.info['agn.NEV'], exponent=exponent, transmitted_fraction=transmitted_fraction * 0 + 1)
         chi2_best = min(chi2_0, chi2_best)
         norm, chi2_, total_variance = chi2_with_norm(
             mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error,
-            NEV, exponent=exponent, transmitted_fraction=transmitted_fraction)
-        posteriors.append(np.concatenate((np.log10(model_variables), [NEV, np.log10(Lbol), np.log10(Lbol_torus), chi2_])))
+            NEV=sed.info['agn.NEV'], exponent=exponent, transmitted_fraction=transmitted_fraction)
+        posteriors.append(np.concatenate((np.log10(model_variables), [chi2_])))
         stellar_mass_column.append(stellar_mass)
 
         wavelength_spec = sed.wavelength_grid
@@ -626,6 +625,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         seddata.append(bands[sed_type][k].get_line(0.5 + 0.341))
         seddata.append(bands[sed_type][k].get_line(0.5 - 0.341))
         np.savetxt('%s/sed_%s.csv.gz' % (plot_dir, sed_type), np.transpose(seddata), header=','.join(header), comments='', delimiter=',')
+        del sed_type
 
     for sed_type in 'mJy', 'lum':
         filters_wl = filters_wl_orig[wobs] / 1000
@@ -880,9 +880,6 @@ def plot_model():
                     sed.cache_filters = cache_filters
 
                     _, model_variables = compute_model_fluxes(sed, filters)
-                    Lbol = compute_Lbol_BBB(agn_sed)
-                    Lbol_torus = compute_Lbol_torus(agn_sed)
-                    NEV = compute_NEV(Lbol)
 
                     wavelength_spec = sed.wavelength_grid.copy()
                     wavelength_spec /= 1. + redshift
@@ -915,8 +912,8 @@ def plot_model():
                     subfilename = filename + '_at%s' % (parameters[i])
                     np.savetxt(
                         subfilename + '.params',
-                        [np.concatenate((parameters, model_variables, [NEV, Lbol, Lbol_torus]))],
-                        delimiter=',', header=','.join(param_names + analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR'])
+                        [np.concatenate((parameters, model_variables))],
+                        delimiter=',', header=','.join(param_names + analysed_variables)
                     )
                     np.savetxt(subfilename + '.csv', np.transpose(outputs), delimiter=',', header=','.join(output_labels), comments='')
 
@@ -936,16 +933,18 @@ def plot_model():
                 plt.close()
 
 
-def generate_fluxes(Ngen=40000):
+def generate_fluxes(Ngen=150000):
     """Generate random SEDs from the configuration and save the fluxes."""
-    rv_redshift = scipy.stats.uniform(0, 6)
-    prior_transform = make_prior_transform(rv_redshift)
+    # redshifts between 0 and 7, with a wide peak around 1-3.
+    rv_redshift = scipy.stats.beta(2, 5, scale=7)
+    prior_transform = make_prior_transform(rv_redshift, num_redshift_points=400)
     cache_filters = {}
 
     fluxdata = np.empty((Ngen, len(param_names + analysed_variables) + 2 + len(filters))) * np.nan
     u = np.random.uniform(size=len(param_names))
     for i in tqdm.trange(Ngen):
         u[np.random.randint(len(param_names))] = np.random.uniform()
+        # last four are always updated, because they are not cached
         u[-4:] = np.random.uniform(size=len(u[-4:]))
         parameters = prior_transform(u)
         stellar_mass = 10**parameters[-4]
@@ -956,21 +955,17 @@ def generate_fluxes(Ngen=40000):
         parameter_list_here[-1] = dict(redshift=redshift)
 
         sed, _, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
-        Lbol = compute_Lbol_BBB(agn_sed)
-        NEV = compute_NEV(Lbol)
         sed.cache_filters = cache_filters
 
         model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
         fluxdata[i][:len(param_names)] = parameters
         fluxdata[i][len(param_names):len(param_names + analysed_variables)] = model_variables
-        fluxdata[i][len(param_names + analysed_variables)] = NEV
-        fluxdata[i][len(param_names + analysed_variables) + 1] = Lbol
-        fluxdata[i][len(param_names + analysed_variables) + 2:] = model_fluxes_full
+        fluxdata[i][len(param_names + analysed_variables):] = model_fluxes_full
         assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
 
-    np.savetxt(
-        "model_fluxes.csv.gz", fluxdata, delimiter=',', comments='',
-        header=','.join(param_names + analysed_variables + ['NEV', 'Lbol'] + filters))
+    # save as fits file
+    tout = Table(data=fluxdata, names=param_names + analysed_variables + filters)
+    tout.write('model_fluxes.fits', overwrite=True)
 
 
 def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, transmitted_fraction, exponent=2):
@@ -980,7 +975,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
     ----------
     model_fluxes: array
         list of SED fluxes
-    model_fluxes: array
+    agn_model_fluxes: array
         list of SED fluxes from the AGN components alone
     obs_fluxes: array
         list of measured fluxes
@@ -1078,41 +1073,6 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
     return norm, chi2_, total_variance
 
 
-def compute_Lbol_BBB(agn_sed):
-    """Compute bolometric AGN luminosity in erg/s.
-
-    Using all AGN components except for the torus
-    integrate from 91.2nm upwards.
-    """
-    wavelength = agn_sed.wavelength_grid
-    wave_mask = wavelength > 91.1753
-    agn_mask = np.array(['activate' in name and 'Torus' not in name for name in agn_sed.contribution_names])
-    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=0)
-    Lbol = np.trapz(y=luminosity[wave_mask], x=wavelength[wave_mask])
-    return Lbol * 1e7
-
-
-def compute_Lbol_torus(agn_sed):
-    """Compute bolometric torus luminosity in erg/s."""
-    wavelength = agn_sed.wavelength_grid
-    agn_mask = np.array(['activate' in name and 'Torus' in name for name in agn_sed.contribution_names])
-    luminosity = agn_sed.luminosities[agn_mask,:].sum(axis=0)
-    Lbol = np.trapz(y=luminosity, x=wavelength)
-    return Lbol * 1e7
-
-
-def compute_NEV(Lbol):
-    """Compute normalised excess variance.
-
-    from Simm+16 Table 3 empirical relation.
-    """
-    # from Simm+16 Table 3: normalised excess variance as a function of Lbol
-    # NEV = min(0.1, 10**(-1.43 - 0.74 * np.log10(Lbol / 1e45)))
-    NEV = min(0.1, 10**(-1.43 - 0.74 * np.log10(Lbol / 1e45)))
-    # print('L5100=%.1e  Lbol=%.1e  var=%.4f' % (L_AGN, Lbol, NEV))
-    return NEV
-
-
 class ModelLikelihood(object):
     """
     Likelihood function, which also knows about the observational data.
@@ -1160,9 +1120,6 @@ class ModelLikelihood(object):
         sed.cache_filters = self.cache_filters
         agn_sed.cache_filters = self.cache_filters
 
-        Lbol = compute_Lbol_BBB(agn_sed)
-        NEV = compute_NEV(Lbol)
-
         model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
         sfr = model_variables[analysed_variables.index('sfh.sfr100Myrs')]
         if not 0 <= sfr <= args.sfr_max:
@@ -1191,7 +1148,7 @@ class ModelLikelihood(object):
         # compute likelihood:
         norm, chi2_, _ = chi2_with_norm(
             model_fluxes, agn_model_fluxes, self.obs_fluxes, self.obs_errors,
-            self.obs_filter_wavelength, redshift, sys_error, NEV,
+            self.obs_filter_wavelength, redshift, sys_error, NEV=sed.info['agn.NEV'],
             exponent=exponent, transmitted_fraction=transmitted_fraction)
 
         logl = -0.5 * chi2_ - norm
