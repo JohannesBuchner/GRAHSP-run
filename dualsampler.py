@@ -161,8 +161,6 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-gbl_warehouse = SedWarehouse()
-
 # keeping it called pcigale.ini allows running pcigale with the same file
 # if the user wants to run cigale
 print("parsing pcigale.ini...")
@@ -186,16 +184,19 @@ parameter_list = config.configuration['creation_modules_params']
 # limit caching to the first few modules, rest is on-the-fly
 cache_depth = module_list.index('biattenuation')
 cache_depth_to_clear = cache_depth
-if module_list[cache_depth - 1] == 'activatebol':
+if module_list[cache_depth_to_clear - 1] == 'activatebol':
     cache_depth_to_clear -= 1
-if module_list[cache_depth - 1] == 'activatepl':
+if module_list[cache_depth_to_clear - 1] == 'activatepl':
     cache_depth_to_clear -= 1
+#if module_list[cache_depth_to_clear - 1] == 'activatetorus':
+#    cache_depth_to_clear -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
 #chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
 mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
 if cache_print:
-    print("Caching modules:", module_list[:cache_depth], "with %d entries" % cache_max)
+    print("Caching modules:", module_list[:cache_depth])
+    print("Caching SEDs:", module_list[:cache_depth_to_clear], "with %d entries" % cache_max)
 analysis_module = get_analysis_module(config.configuration[
     'analysis_method'])
 analysis_module_params = config.configuration['analysis_method_params']
@@ -210,6 +211,8 @@ exponent = int(statistics_config.get('exponent', '2'))
 with_attenuation_model_uncertainty = statistics_config.get('attenuation_model_uncertainty', 'false').lower() == 'true'
 variability_uncertainty = statistics_config.get('variability_uncertainty', 'true').lower() == 'true'
 systematics_width = float(statistics_config.get('systematics_width', '0.01'))
+
+gbl_warehouse = SedWarehouse(store_depth=cache_depth)
 
 
 def list_filters():
@@ -364,7 +367,11 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     if len(gbl_warehouse.storage.dictionary) > cache_max:
         if cache_print:
             print("clearing cache:", len(gbl_warehouse.storage.dictionary))
-        gbl_warehouse.partial_clear_cache(cache_depth_to_clear)
+        if np.random.uniform() < 0.01:
+            # clear cache completely, occasionally, for speed
+            gbl_warehouse.partial_clear_cache(0)
+        else:
+            gbl_warehouse.partial_clear_cache(cache_depth_to_clear)
         if cache_print:
             print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
 
@@ -933,35 +940,39 @@ def plot_model():
                 plt.close()
 
 
-def generate_fluxes(Ngen=150000):
+def generate_fluxes(Ngen=100000):
     """Generate random SEDs from the configuration and save the fluxes."""
     # redshifts between 0 and 7, with a wide peak around 1-3.
     rv_redshift = scipy.stats.beta(2, 5, scale=7)
     prior_transform = make_prior_transform(rv_redshift, num_redshift_points=400)
     cache_filters = {}
 
-    fluxdata = np.empty((Ngen, len(param_names + analysed_variables) + 2 + len(filters))) * np.nan
+    fluxdata = np.empty((Ngen, len(param_names + analysed_variables) + len(filters))) * np.nan
     u = np.random.uniform(size=len(param_names))
-    for i in tqdm.trange(Ngen):
-        u[np.random.randint(len(param_names))] = np.random.uniform()
-        # last four are always updated, because they are not cached
-        u[-4:] = np.random.uniform(size=len(u[-4:]))
-        parameters = prior_transform(u)
-        stellar_mass = 10**parameters[-4]
-        L_AGN = 10**parameters[-3]
-        redshift = parameters[-2]
-        parameter_list_here = make_parameter_list(parameters)
-        assert module_list[-1] == 'redshifting'
-        parameter_list_here[-1] = dict(redshift=redshift)
+    assert module_list[-1] == 'redshifting'
+    with FastAttenuation():
+        for i in tqdm.trange(Ngen):
+            while True:
+                u[i % len(param_names)] = np.random.uniform()
+                # last four are always updated, because they are not cached
+                u[-4:] = np.random.uniform(size=len(u[-4:]))
+                parameters = prior_transform(u)
+                stellar_mass = 10**parameters[-4]
+                L_AGN = 10**parameters[-3]
+                redshift = parameters[-2]
+                parameter_list_here = make_parameter_list(parameters)
+                parameter_list_here[-1] = dict(redshift=redshift)
 
-        sed, _, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
-        sed.cache_filters = cache_filters
+                sed, _, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
+                sed.cache_filters = cache_filters
 
-        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
-        fluxdata[i][:len(param_names)] = parameters
-        fluxdata[i][len(param_names):len(param_names + analysed_variables)] = model_variables
-        fluxdata[i][len(param_names + analysed_variables):] = model_fluxes_full
-        assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
+                model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
+                if (model_fluxes_full >= 0).all():
+                    fluxdata[i][:len(param_names)] = parameters
+                    fluxdata[i][len(param_names):len(param_names + analysed_variables)] = model_variables
+                    fluxdata[i][len(param_names + analysed_variables):] = model_fluxes_full
+                    break
+            assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
 
     # save as fits file
     tout = Table(data=fluxdata, names=param_names + analysed_variables + filters)
