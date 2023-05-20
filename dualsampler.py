@@ -35,8 +35,8 @@ import sys
 import argparse
 import numpy as np
 from numpy import log, log10
+import warnings
 from math import erf
-import logging
 from importlib import import_module
 import multiprocessing
 
@@ -127,7 +127,7 @@ parser.add_argument(
     help='stride in the input file to process (every nth row)')
 
 parser.add_argument(
-    '--cores', type=int, default=-1,
+    '--cores', type=int, default=1,
     help='number of processes to parallelise for (see joblib.Parallel)')
 parser.add_argument(
     '--num-posterior-samples', type=int, default=50,
@@ -188,8 +188,8 @@ if module_list[cache_depth_to_clear - 1] == 'activatebol':
     cache_depth_to_clear -= 1
 if module_list[cache_depth_to_clear - 1] == 'activatepl':
     cache_depth_to_clear -= 1
-#if module_list[cache_depth_to_clear - 1] == 'activatetorus':
-#    cache_depth_to_clear -= 1
+if module_list[cache_depth_to_clear - 1] == 'activategtorus':
+    cache_depth_to_clear -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
 #chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
 mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
@@ -212,8 +212,7 @@ with_attenuation_model_uncertainty = statistics_config.get('attenuation_model_un
 variability_uncertainty = statistics_config.get('variability_uncertainty', 'true').lower() == 'true'
 systematics_width = float(statistics_config.get('systematics_width', '0.01'))
 
-gbl_warehouse = SedWarehouse(store_depth=cache_depth)
-
+gbl_warehouse = SedWarehouse(store_depth=cache_depth, reusable=('activategtorus', 'activatepl', 'activatebol', 'biattenuation'))
 
 def list_filters():
     """List all known filters."""
@@ -366,14 +365,14 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     # this clears the cache, if we are in danger of running out of memory (CACHE_MAX environment variable)
     if len(gbl_warehouse.storage.dictionary) > cache_max:
         if cache_print:
-            print("clearing cache:", len(gbl_warehouse.storage.dictionary))
+            sys.stderr.write("clearing cache (%d objects) ..." % len(gbl_warehouse.storage.dictionary))
         if np.random.uniform() < 0.01:
             # clear cache completely, occasionally, for speed
             gbl_warehouse.partial_clear_cache(0)
         else:
             gbl_warehouse.partial_clear_cache(cache_depth_to_clear)
         if cache_print:
-            print("cleared  cache:", len(gbl_warehouse.storage.dictionary))
+            sys.stderr.write("cleared, %d remain.  \n" % len(gbl_warehouse.storage.dictionary))
 
     # compute galaxy and AGN SEDs, un-normalised
     sed = gbl_warehouse.get_sed(module_list[:cache_depth], parameter_list_gal[:cache_depth])
@@ -474,12 +473,13 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     assert np.isfinite(results['samples']).all()
 
     # avoid replotting if nothing changed and all the files are there
-    if not replot and all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'derived', 'sed_mJy', 'sed_lum', 'corner'))):
+    if not replot and all((os.path.exists('%s/%s.pdf' % (plot_dir, f)) for f in ('posteriors', 'derived', 'sed_mJy', 'sed_lum'))):
         print("not replotting.")
         return
 
     plot_posteriors('%s/posteriors.pdf' % plot_dir, prior_samples, param_names, results['samples'])
 
+    """
     print("making corner plot ...")
     smooth_samples = sampler.results['samples'].copy()
     for i in range(len(param_names)):
@@ -503,8 +503,9 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         logging.root.removeHandler(handler)
     plt.savefig('%s/corner.pdf' % plot_dir)
     plt.close()
+    """
 
-    print("making SED instances ...")
+    print("making SED instances for plotting ...")
     bands = {'lum': {}, 'mJy': {}}
 
     z = obs['redshift']
@@ -528,6 +529,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
+        agn_sed.cache_filters = cache_filters
+        gal_sed.cache_filters = cache_filters
 
         model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
@@ -562,6 +565,9 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         for sed_type in 'mJy', 'lum':
             wavelength_spec2 = wavelength_spec.copy()
+            wavelength_spec_mask = np.logical_and(
+                wavelength_spec2 >= PLOT_L_MIN * 0.9,
+                wavelength_spec2 <= PLOT_L_MAX * 1.1)
             if sed_type == 'lum':
                 sed_multiplier = wavelength_spec2.copy() * (redshift + 1)
                 wavelength_spec2 /= 1. + z
@@ -578,30 +584,24 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
                 if not any(k in sed.contribution_names for k in keys):
                     continue
                 if j not in bands[sed_type]:
-                    print("  building", sed_type, plot_element['label'])
-                    bands[sed_type][j] = PredictionBand(wavelength_spec2)
+                    # print("  building", sed_type, plot_element['label'])
+                    bands[sed_type][j] = PredictionBand(wavelength_spec2[wavelength_spec_mask])
                 pred = sum(sed.get_lumin_contribution(k) * sed_multiplier for k in keys if k in sed.contribution_names)
                 assert np.isfinite(pred).all(), pred
                 assert bands[sed_type][j].x.shape == pred.shape, (bands[sed_type][j].x.shape, pred.shape)
                 # print(plot_element['label'], pred)
-                bands[sed_type][j].add(pred)
+                bands[sed_type][j].add(pred[wavelength_spec_mask])
             if 'total' not in bands[sed_type]:
-                bands[sed_type]['total'] = PredictionBand(wavelength_spec2)
-            bands[sed_type]['total'].add(sed.luminosity * sed_multiplier)
+                bands[sed_type]['total'] = PredictionBand(wavelength_spec2[wavelength_spec_mask])
+            bands[sed_type]['total'].add((sed.luminosity * sed_multiplier)[wavelength_spec_mask])
 
-    print("SED model components:", ' '.join(sed.contribution_names))
-
-    print("SED info available:", ' '.join(sed.info.keys()))
-    print("selected:", len(posteriors_names), posteriors_names)
     posteriors = np.array(posteriors)
     # add specific (normalised by stellar mass) AGN luminosities
     for i, n in enumerate(list(posteriors_names)):
         if 'sfh.sfr' in n:
-            print("adding column for", n)
             posteriors = np.hstack((posteriors, (posteriors[:,i] / stellar_mass_column).reshape((-1,1))))
             posteriors_names.append('s_' + n)
         elif 'agn.lum' in n or 'Lbol' in n:
-            print("adding column for", n)
             posteriors = np.hstack((posteriors, (posteriors[:,i] - np.log10(stellar_mass_column)).reshape((-1,1))))
             posteriors_names.append('s_' + n)
     # print("   +specific:", len(posteriors_names), posteriors_names)
@@ -617,7 +617,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     print("write out SED as csv files ...")
     for sed_type in 'mJy', 'lum':
         header = ['wavelength']
-        seddata = [wavelength_spec2]
+        seddata = [bands[sed_type]['total'].x]
         for j, plot_element in enumerate(plot_elements):
             if j not in bands[sed_type]:
                 continue
@@ -635,6 +635,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         del sed_type
 
     for sed_type in 'mJy', 'lum':
+        print("  plotting", sed_type)
         filters_wl = filters_wl_orig[wobs] / 1000
         # wsed = np.where((wavelength_spec2 > xmin) & (wavelength_spec2 < xmax))
 
@@ -649,7 +650,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         bands[sed_type]['total'].line(color='k', label='Model spectrum', linewidth=1.5)
         for j, plot_element in enumerate(plot_elements):
             if j in bands[sed_type]:
-                print("  plotting", sed_type, plot_element['label'], np.shape(bands[sed_type][j].ys))
+                # print("  plotting", sed_type, plot_element['label'], np.shape(bands[sed_type][j].ys))
                 bands[sed_type][j].shade(0.45, color=plot_element['color'], alpha=0.1)
                 line_kwargs = dict(plot_element)
                 del line_kwargs['keys']
@@ -863,7 +864,7 @@ def plot_model():
             print("varying", p)
 
             u = umid.copy()
-            for AGNtype in 1, 2, 3:
+            for AGNtype in 1,: # 2, 3:
                 last_value = np.nan
                 plt.figure(figsize=(12, 6))
                 filename = 'modelspectrum_L%d_type%s_%s' % (logL_AGN, AGNtype, p.replace('(', '').replace(')', ''))
@@ -938,6 +939,11 @@ def plot_model():
 
                 plt.savefig(filename + '.png', bbox_inches='tight')
                 plt.close()
+
+    print("SED model components:", ' '.join(sed.contribution_names))
+    print("SED info available:", ' '.join(sed.info.keys()))
+    print("Selected for analysis:", len(analysed_variables), analysed_variables)
+
 
 
 def generate_fluxes(Ngen=100000):
@@ -1277,8 +1283,10 @@ def analyse_obs(samplername, obs, plot=True):
 
     # select the filters from the list of active filters
 
-    obs_fluxes_full = np.array([obs[name] for name in filters])
-    obs_errors_full = np.array([obs[name + "_err"] for name in filters])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        obs_fluxes_full = np.array([obs[name] for name in filters])
+        obs_errors_full = np.array([obs[name + "_err"] for name in filters])
 
     wobs = np.where(obs_fluxes_full > TOLERANCE)
     obs_fluxes = obs_fluxes_full[wobs]
@@ -1365,33 +1373,33 @@ def main():
             np.random.shuffle(indices)
         fout = None
         # analyse observations in parallel
-        with mp_ctx.Pool(args.cores, maxtasksperchild=3) as pool:
-            if args.cores == 1:
-                # to preserve traceback for debugging run in here
-                allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
-            else:
+        if args.cores == 1:
+            # to preserve traceback for debugging run in here
+            allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
+        else:
+            with mp_ctx.Pool(args.cores, maxtasksperchild=3) as pool:
                 # farm out to process pool
                 allresults = pool.imap_unordered(
                     analyse_obs_wrapper,
                     ((args.sampler, obs_table_here[i], plot) for i in indices))
-            for id, result, results_string in allresults:
-                if results_string is None:
-                    print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
-                    continue
-                derived_names = analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
-                names = param_names + derived_names
-                names += ['s_' + n for n in derived_names if 'sfh.sfr' in n or 'agn.lum' in n or 'Lbol' in n]
-                names += ['totalflux_' + filtername for filtername in filters]
-                names += ['AGNflux_' + filtername for filtername in filters]
-                names += ['GALflux_' + filtername for filtername in filters]
-                if fout is None:
-                    fout = open(data_file + '_analysis_results.txt', 'w')
-                    fout.write('# id')
-                    for name in names:
-                        fout.write('\t%s_mean\t%s_std\t%s_lo\t%s_hi\t%s_med\t%s_lmean' % (name, name, name, name, name, name))
-                    fout.write('\n')
-                fout.write(results_string)
-                fout.flush()
+        for id, result, results_string in allresults:
+            if results_string is None:
+                print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
+                continue
+            derived_names = analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
+            names = param_names + derived_names
+            names += ['s_' + n for n in derived_names if 'sfh.sfr' in n or 'agn.lum' in n or 'Lbol' in n]
+            names += ['totalflux_' + filtername for filtername in filters]
+            names += ['AGNflux_' + filtername for filtername in filters]
+            names += ['GALflux_' + filtername for filtername in filters]
+            if fout is None:
+                fout = open(data_file + '_analysis_results.txt', 'w')
+                fout.write('# id')
+                for name in names:
+                    fout.write('\t%s_mean\t%s_std\t%s_lo\t%s_hi\t%s_med\t%s_lmean' % (name, name, name, name, name, name))
+                fout.write('\n')
+            fout.write(results_string)
+            fout.flush()
 
         print("analying %d observations done." % len(obs_table_here))
 
