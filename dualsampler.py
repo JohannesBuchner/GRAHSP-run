@@ -39,6 +39,7 @@ import warnings
 from math import erf
 from importlib import import_module
 import multiprocessing
+import joblib
 
 import scipy.stats
 from scipy.constants import c
@@ -50,7 +51,6 @@ from pcigale.analysis_modules import get_module as get_analysis_module
 from pcigale.utils import read_table
 from pcigale.analysis_modules import complete_obs_table
 from pcigale.warehouse import SedWarehouse
-from pcigale import creation_modules
 from pcigale.analysis_modules.pdf_analysis import TOLERANCE
 from pcigale.data import Database
 from pcigale.creation_modules.biattenuation import BiAttenuationLaw
@@ -60,6 +60,7 @@ from astropy.table import Table
 import pcigale.creation_modules.redshifting
 
 from ultranest import ReactiveNestedSampler
+from ultranest.mlfriends import SimpleRegion, RobustEllipsoidRegion
 from ultranest.plot import PredictionBand
 import ultranest.stepsampler
 import tqdm
@@ -86,6 +87,39 @@ class DeltaDist(object):
 
     def std(self):
         return 0
+
+class ExponentialDist(object):
+    """Faster exponential distribution than the scipy implementation."""
+
+    # provides compatibility with scipy.stats distributions when a parameter is fixed
+    def __init__(self, scale):
+        self.scale = scale
+
+    def ppf(self, u):
+        return self.scale * -np.log1p(-u)
+
+    def mean(self):
+        return self.scale
+
+    def std(self):
+        return self.scale
+
+class NormalDist(object):
+    """Faster Gaussian distribution than the scipy implementation."""
+
+    # provides compatibility with scipy.stats distributions when a parameter is fixed
+    def __init__(self, mean, scale):
+        self.scale = scale
+        self.mean = mean
+
+    def ppf(self, u):
+        return scipy.special.ndtri(u) * self.scale + self.mean
+
+    def mean(self):
+        return self.mean
+
+    def std(self):
+        return self.std
 
 
 class FastAttenuation(object):
@@ -278,7 +312,7 @@ param_names.append("log_stellar_mass")
 param_names.append("log_L_AGN")
 param_names.append("redshift")
 param_names.append("systematics")
-rv_systematics = scipy.stats.expon(scale=systematics_width)
+rv_systematics = ExponentialDist(scale=systematics_width)
 
 print("Statistics")
 print("----------")
@@ -385,6 +419,8 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     # scale the AGN and galactic components as needed
     scaled_sed = sed.copy()
     scaled_sed.luminosities[~agn_mask] *= stellar_mass
+    assert sed.info['sfh.sfr'] > 0, sed.info['sfh.sfr']
+    assert stellar_mass > 0, stellar_mass
     scaled_sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info})
     # convert from erg/s/A at 5100A to erg/s with 5100
     # convert from erg/s to W, the luminosity unit of cigale, with 1e7
@@ -412,14 +448,16 @@ PLOT_L_MAX = 50
 def plot_posteriors(filename, prior_samples, param_names, samples):
     """Make plot of parameter posteriors compared to prior."""
     print("plotting posteriors ...")
-    plt.figure(figsize=(12, 12))
+    plt.figure(figsize=(12, 8))
     for i, (param_name, samples) in enumerate(zip(param_names, samples.transpose())):
-        plt.subplot(4, len(param_names) // 4 + 1, i + 1)
+        ax = plt.subplot(4, len(param_names) // 4 + 1, i + 1)
         bins = np.unique(list(set(prior_samples[:, i]).union(set(samples))))
         if not np.isfinite(bins).all():
             print("WARNING: parameter %s is bad, remove it from the analysis list" % param_name)
         if len(bins) > 2 and bins[-1] > bins[-2]:
             bins = np.concatenate((bins, [bins[-1] + bins[-1] - bins[-2]]))
+        elif len(bins) == 1:
+            bins = [bins[0] - 0.02, bins[0], bins[0] + 0.02]
         if len(bins) > 40:
             bins = 20
         with np.errstate(invalid='ignore', divide='ignore'):
@@ -431,9 +469,11 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
                 density=True, bins=bins, color='gray', ls='-')
         plt.xlim(xlo, xhi)
         plt.yticks([])
-        plt.xlabel(param_names[i])
+        plt.xlabel(('' if i % 2 == 0 else "\n") + param_names[i])
+        ax.spines[['right', 'top', 'left']].set_visible(False)
+        ax.get_xaxis().tick_bottom()
 
-    plt.subplots_adjust(wspace=0.1)
+    plt.subplots_adjust(wspace=0.1, hspace=0.7)
     plt.savefig(filename, bbox_inches='tight')
     plt.close()
 
@@ -565,12 +605,9 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         for sed_type in 'mJy', 'lum':
             wavelength_spec2 = wavelength_spec.copy()
-            wavelength_spec_mask = np.logical_and(
-                wavelength_spec2 >= PLOT_L_MIN * 0.9,
-                wavelength_spec2 <= PLOT_L_MAX * 1.1)
             if sed_type == 'lum':
                 sed_multiplier = wavelength_spec2.copy() * (redshift + 1)
-                wavelength_spec2 /= 1. + z
+                wavelength_spec2 /= 1. + redshift
             elif sed_type == 'mJy':
                 sed_multiplier = (wavelength_spec2 * 1e29 /
                                    (c / (wavelength_spec2 * 1e-9)) /
@@ -585,15 +622,15 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
                     continue
                 if j not in bands[sed_type]:
                     # print("  building", sed_type, plot_element['label'])
-                    bands[sed_type][j] = PredictionBand(wavelength_spec2[wavelength_spec_mask])
+                    bands[sed_type][j] = PredictionBand(wavelength_spec2)
                 pred = sum(sed.get_lumin_contribution(k) * sed_multiplier for k in keys if k in sed.contribution_names)
                 assert np.isfinite(pred).all(), pred
                 assert bands[sed_type][j].x.shape == pred.shape, (bands[sed_type][j].x.shape, pred.shape)
                 # print(plot_element['label'], pred)
-                bands[sed_type][j].add(pred[wavelength_spec_mask])
+                bands[sed_type][j].add(pred)
             if 'total' not in bands[sed_type]:
-                bands[sed_type]['total'] = PredictionBand(wavelength_spec2[wavelength_spec_mask])
-            bands[sed_type]['total'].add((sed.luminosity * sed_multiplier)[wavelength_spec_mask])
+                bands[sed_type]['total'] = PredictionBand(wavelength_spec2)
+            bands[sed_type]['total'].add((sed.luminosity * sed_multiplier))
 
     posteriors = np.array(posteriors)
     # add specific (normalised by stellar mass) AGN luminosities
@@ -614,28 +651,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     # print("   +fluxes:", len(posteriors_names), posteriors_names)
     np.savetxt('%s/derived.csv' % plot_dir, posteriors, header=','.join(posteriors_names), comments='', delimiter=',')
 
-    print("write out SED as csv files ...")
     for sed_type in 'mJy', 'lum':
-        header = ['wavelength']
-        seddata = [bands[sed_type]['total'].x]
-        for j, plot_element in enumerate(plot_elements):
-            if j not in bands[sed_type]:
-                continue
-            k = plot_element['label']
-            header += [k, k + '_errup', k + '_errlo']
-            seddata.append(bands[sed_type][j].get_line())
-            seddata.append(bands[sed_type][j].get_line(0.5 + 0.341))
-            seddata.append(bands[sed_type][j].get_line(0.5 - 0.341))
-        k = 'total'
-        header += [k, k + '_errup', k + '_errlo']
-        seddata.append(bands[sed_type][k].get_line())
-        seddata.append(bands[sed_type][k].get_line(0.5 + 0.341))
-        seddata.append(bands[sed_type][k].get_line(0.5 - 0.341))
-        np.savetxt('%s/sed_%s.csv.gz' % (plot_dir, sed_type), np.transpose(seddata), header=','.join(header), comments='', delimiter=',')
-        del sed_type
-
-    for sed_type in 'mJy', 'lum':
-        print("  plotting", sed_type)
+        print("  plotting", sed_type, ', writing out as CSV file ...')
         filters_wl = filters_wl_orig[wobs] / 1000
         # wsed = np.where((wavelength_spec2 > xmin) & (wavelength_spec2 < xmax))
 
@@ -646,15 +663,30 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         ax2 = plt.subplot(gs[1])
 
         plt.sca(ax1)
-        bands[sed_type]['total'].shade(0.45, color='k', alpha=0.2)
-        bands[sed_type]['total'].line(color='k', label='Model spectrum', linewidth=1.5)
+
+        header = ['wavelength']
+        seddata = [bands[sed_type]['total'].x]
         for j, plot_element in enumerate(plot_elements):
-            if j in bands[sed_type]:
-                # print("  plotting", sed_type, plot_element['label'], np.shape(bands[sed_type][j].ys))
-                bands[sed_type][j].shade(0.45, color=plot_element['color'], alpha=0.1)
-                line_kwargs = dict(plot_element)
-                del line_kwargs['keys']
-                bands[sed_type][j].line(**line_kwargs)
+            if j not in bands[sed_type]:
+                continue
+            k = plot_element['label']
+            header += [k, k + '_errup', k + '_errlo']
+            mid, up, lo = np.quantile(bands[sed_type][j].ys, [0.5, 0.5 + 0.341, 0.5 - 0.341], axis=0)
+            assert mid.shape == bands[sed_type][j].x.shape
+            line_kwargs = dict(plot_element)
+            del line_kwargs['keys']
+            plt.plot(bands[sed_type][j].x, mid, **line_kwargs)
+            plt.fill_between(bands[sed_type][j].x, lo, up, color=plot_element['color'], alpha=0.1)
+            seddata += [mid, up, lo]
+            del j, plot_element
+        k = 'total'
+        header += [k, k + '_errup', k + '_errlo']
+        mid, up, lo = np.quantile(bands[sed_type][k].ys, [0.5, 0.5 + 0.341, 0.5 - 0.341], axis=0)
+        assert mid.shape == bands[sed_type][k].x.shape
+        seddata += [mid, up, lo]
+        np.savetxt('%s/sed_%s.csv.gz' % (plot_dir, sed_type), np.transpose(seddata), header=','.join(header), comments='', delimiter=',')
+        plt.plot(bands[sed_type]['total'].x, mid, color='k', label='Model spectrum', linewidth=1.5)
+        plt.fill_between(bands[sed_type]['total'].x, lo, up, color='k', alpha=0.2)
 
         if sed_type == 'lum':
             # shift back from observed-frame to rest-frame units:
@@ -796,8 +828,8 @@ def make_prior_transform(rv_redshift, Finfo=None, num_redshift_points=40):
     if Finfo is not None:
         FAGN, FAGN_errlo, FAGN_errhi = Finfo
         # Sides of the asymmetric gaussian prior on log(flux)
-        rv_F_lo = scipy.stats.norm(FAGN, FAGN_errlo)
-        rv_F_hi = scipy.stats.norm(FAGN, FAGN_errhi)
+        rv_F_lo = NormalDist(FAGN, FAGN_errlo)
+        rv_F_hi = NormalDist(FAGN, FAGN_errhi)
 
         def L_prior_transform(u, redshift):
             # pick the appropriate side
@@ -978,6 +1010,8 @@ def generate_fluxes(Ngen=100000):
                     fluxdata[i][len(param_names):len(param_names + analysed_variables)] = model_variables
                     fluxdata[i][len(param_names + analysed_variables):] = model_fluxes_full
                     break
+                else:
+                    assert np.logical_or(model_fluxes_full > -1e-9, model_fluxes_full == -99).all(), ("some filters give negative fluxes:", filters, model_fluxes_full)
             assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
 
     # save as fits file
@@ -1149,7 +1183,7 @@ class ModelLikelihood(object):
             return logl
 
         for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
-            module_instance = creation_modules.get_module(module_name, **module_parameters)
+            module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
             module_instance.process(agn_sed)
 
         agn_model_fluxes_full, _ = compute_model_fluxes(agn_sed, filters)
@@ -1312,6 +1346,8 @@ def analyse_obs(samplername, obs, plot=True):
                 active_param_names, loglikelihood, prior_transform,
                 log_dir=outdir, resume='resume', derived_param_names=derived_param_names)
         except Exception as e:
+            # check that there are not errors running the model ...
+            loglikelihood(prior_samples[0])
             print("WARNING: could not resume because of %s. overwriting." % e)
             os.unlink(outdir + '/results/points.hdf5')
             # previous results are invalid, so start from scratch
@@ -1324,11 +1360,11 @@ def analyse_obs(samplername, obs, plot=True):
             frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50,
             dlogz=10, min_ess=100, cluster_num_live_points=0, viz_callback=None
         )
-        sampler.run(max_ncalls=10000, **sampler_args)
+        sampler.run(max_ncalls=10000, region_class=RobustEllipsoidRegion, **sampler_args)
         print("  running with step sampler ...")
         sampler.stepsampler = ultranest.stepsampler.SliceSampler(
             nsteps=20, generate_direction=ultranest.stepsampler.generate_mixture_random_direction)
-        sampler.run(**sampler_args)
+        sampler.run(region_class=SimpleRegion, **sampler_args)
         sampler.print_results()
     if plot:
         results = plot_results(
@@ -1376,6 +1412,10 @@ def main():
         if args.cores == 1:
             # to preserve traceback for debugging run in here
             allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
+        elif os.environ.get('MP_METHOD', 'forkserver') == 'joblib':
+            allresults = joblib.Parallel(args.cores)(
+                joblib.delayed(analyse_obs_wrapper)(
+                (args.sampler, obs_table_here[i], plot) for i in indices))
         else:
             with mp_ctx.Pool(args.cores, maxtasksperchild=3) as pool:
                 # farm out to process pool
