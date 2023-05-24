@@ -64,10 +64,10 @@ from ultranest.mlfriends import SimpleRegion, RobustEllipsoidRegion
 from ultranest.plot import PredictionBand
 import ultranest.stepsampler
 import tqdm
-import getdist
-import getdist.plots
-import getdist.chains
-getdist.chains.print_load_details = False
+#import getdist
+#import getdist.plots
+#import getdist.chains
+#getdist.chains.print_load_details = False
 
 # some helper classes:
 
@@ -225,8 +225,6 @@ if module_list[cache_depth_to_clear - 1] == 'activatepl':
 if module_list[cache_depth_to_clear - 1] == 'activategtorus':
     cache_depth_to_clear -= 1
 cache_max = int(os.environ.get('CACHE_MAX', '10000'))
-#chunk_size = int(os.environ.get('CHUNKSIZE', '20'))
-mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
 cache_print = os.environ.get('CACHE_VERBOSE', '0') == '1'
 if cache_print:
     print("Caching modules:", module_list[:cache_depth])
@@ -1409,15 +1407,16 @@ def main():
             np.random.shuffle(indices)
         fout = None
         # analyse observations in parallel
-        if args.cores == 1:
+        if n_cores == 1:
             # to preserve traceback for debugging run in here
             allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
         elif os.environ.get('MP_METHOD', 'forkserver') == 'joblib':
-            allresults = joblib.Parallel(args.cores)(
+            allresults = joblib.Parallel(n_jobs=n_cores)(
                 joblib.delayed(analyse_obs_wrapper)(
-                (args.sampler, obs_table_here[i], plot) for i in indices))
+                (args.sampler, obs_table_here[i], plot)) for i in indices))
         else:
-            with mp_ctx.Pool(args.cores, maxtasksperchild=3) as pool:
+            mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
+            with mp_ctx.Pool(n_cores, maxtasksperchild=3) as pool:
                 # farm out to process pool
                 allresults = pool.imap_unordered(
                     analyse_obs_wrapper,
