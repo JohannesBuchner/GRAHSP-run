@@ -241,6 +241,7 @@ mock_flag = analysis_module_params["mock_flag"].lower() == "true"
 # get statistics configuration
 exponent = int(statistics_config.get('exponent', '2'))
 with_attenuation_model_uncertainty = statistics_config.get('attenuation_model_uncertainty', 'false').lower() == 'true'
+with_Ly_break_uncertainty = statistics_config.get('Ly_break_uncertainty', 'false').lower() == 'true'
 variability_uncertainty = statistics_config.get('variability_uncertainty', 'true').lower() == 'true'
 systematics_width = float(statistics_config.get('systematics_width', '0.01'))
 
@@ -1091,16 +1092,24 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
         transmitted_fraction[transmitted_fraction < 1e-4] = 1e-4
         transmitted_fraction[transmitted_fraction > 1.0] = 1.0
         neg_log_transmitted = -np.log10(transmitted_fraction + 1e-4)
-        # powerlaw increase from 0->1e-4 to 1->0.01  (2->1)
+        # powerlaw increase of uncertainty fraction
+        # at transmitted_fraction     = 0, 0.1, 1
+        # is neg_log_transmitted      = -4, -1, 0
+        # is log_uncertainty_fraction = -1, -2, -4
         log_uncertainty_fraction = -4 + 2 * neg_log_transmitted
-        # but threshold at 1%
-        log_uncertainty_fraction[log_uncertainty_fraction > -2] = -2
+        # but threshold at 10%
+        log_uncertainty_fraction[log_uncertainty_fraction > -1] = -1
         # this is the uncertainty relative to the unattenuated spectrum
         # since we apply to total fluxes, we need to correct it upwards.
         attenuation_uncertainty = 10**log_uncertainty_fraction / transmitted_fraction
         # print("attenuation model uncertainties:", transmitted_fraction, 10**log_uncertainty_fraction, attenuation_uncertainty)
         # apply as a fraction of total model fluxes
         sys_variance += (attenuation_uncertainty * model_fluxes)**2
+
+    if with_Ly_break_uncertainty:
+        # ignore measurements falling below the Lyman break, as the IGM model is simplistic
+        Ly_break_uncertainty = np.where(obs_filter_wavelength / (1 + redshift) < 100, 10000, 0)
+        sys_variance += (Ly_break_uncertainty * model_fluxes)**2
     del obs_filter_wavelength
     del redshift
 
