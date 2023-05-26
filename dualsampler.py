@@ -486,12 +486,16 @@ def _with_attenuation(keys):
 
 # groups of SED contributions to include in the fit
 plot_elements = [
+    # if you also want the unattenuated emission:
+    #dict(keys=['stellar.young', 'stellar.old'],
+    #     label="Stellar (unattenuated)", color='orange', marker=None, linestyle=':',),
     dict(keys=_with_attenuation(['stellar.young', 'stellar.old']),
          label="Stellar (attenuated)", color='orange', marker=None, linestyle='-',),
-    # dict(keys=['stellar.young', 'stellar.old'],
-    #      label="Stellar (unattenuated)", color='b', marker=None, nonposy='clip', linestyle='--', linewidth=0.5),
     dict(keys=_with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
          label="Nebular emission", color='y', marker=None, linewidth=.5),
+    # if you also want the unattenuated disk:
+    #dict(keys=['agn.activate_Disk'],
+    #     label="AGN disk (unattenuated)", color=[0.90, 0.90, 0.72], marker=None, linestyle=':', linewidth=1.5),
     dict(keys=_with_attenuation(['agn.activate_Disk']),
          label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
     dict(keys=_with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
