@@ -22,8 +22,8 @@ Columns:
 - id
 - redshift
 - redshift_err (optional)
-- LAGN: AGN 5100 Angstrom luminosity
-- LAGN_errlo and LAGN_errhi or LAGN_err for luminosity uncertainties
+- FAGN: AGN 5100 Angstrom luminosity divided by luminosity distance
+- FAGN_errlo and FAGN_errhi or FAGN_err for uncertainties
 
 The L(2-10keV) luminosity is approximately the 5100 Angstrom luminosity,
 with a systematic scatter of +-0.43 dex (Koss+2017).
@@ -46,6 +46,7 @@ from scipy.constants import c
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
+import pcigale
 from pcigale.session.configuration import Configuration
 from pcigale.analysis_modules import get_module as get_analysis_module
 from pcigale.utils import read_table
@@ -200,7 +201,7 @@ args = parser.parse_args()
 
 # keeping it called pcigale.ini allows running pcigale with the same file
 # if the user wants to run cigale
-print("parsing pcigale.ini...")
+print("GRAHSP version %s | parsing pcigale.ini..." % pcigale.__version__)
 config = Configuration("pcigale.ini")
 
 cosmo_string = config.config.get('cosmology', 'concordance')
