@@ -463,12 +463,12 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
         if len(bins) > 40:
             bins = 20
         with np.errstate(invalid='ignore', divide='ignore'):
-            plt.hist(samples, histtype='step', density=True, bins=bins)
+            plt.hist(samples, histtype='step', density=True, bins=bins, lw=2, alpha=0.5)
         xlo, xhi = plt.xlim()
         with np.errstate(invalid='ignore', divide='ignore'):
             plt.hist(
                 prior_samples[:, i], histtype='step',
-                density=True, bins=bins, color='gray', ls='-')
+                density=True, bins=bins, color='gray', ls='-', lw=1, alpha=0.5)
         plt.xlim(xlo, xhi)
         plt.yticks([])
         plt.xlabel(('' if i % 2 == 0 else "\n") + param_names[i])
@@ -637,10 +637,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     posteriors = np.array(posteriors)
     # add specific (normalised by stellar mass) AGN luminosities
     for i, n in enumerate(list(posteriors_names)):
-        if 'sfh.sfr' in n:
-            posteriors = np.hstack((posteriors, (posteriors[:,i] / stellar_mass_column).reshape((-1,1))))
-            posteriors_names.append('s_' + n)
-        elif 'agn.lum' in n or 'Lbol' in n:
+        if 'agn.lum' in n or 'Lbol' in n or 'sfh.sfr' in n:
             posteriors = np.hstack((posteriors, (posteriors[:,i] - np.log10(stellar_mass_column)).reshape((-1,1))))
             posteriors_names.append('s_' + n)
     # print("   +specific:", len(posteriors_names), posteriors_names)
@@ -1348,7 +1345,7 @@ def analyse_obs(samplername, obs, plot=True):
     if args.mass_max != 15:
         outdir += "_maxgal%d" % args.mass_max
 
-    replot = not os.path.exists(outdir + '/analysis_results.txt')
+    replot = (os.environ.get('REPLOT', '0') == '1') or not os.path.exists(outdir + '/analysis_results.txt')
     results = None
     with FastAttenuation():
         try:
@@ -1437,7 +1434,7 @@ def main():
             if results_string is None:
                 print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
                 continue
-            derived_names = analysed_variables + ['NEV', 'LbolBBB', 'LbolTOR', 'chi2']
+            derived_names = analysed_variables + ['chi2']
             names = param_names + derived_names
             names += ['s_' + n for n in derived_names if 'sfh.sfr' in n or 'agn.lum' in n or 'Lbol' in n]
             names += ['totalflux_' + filtername for filtername in filters]
