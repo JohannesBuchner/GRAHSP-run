@@ -1145,15 +1145,19 @@ class ModelLikelihood(object):
         uncertainties for obs_fluxes
     obs_filter_wavelength: list
         observed_frame wavelength of each filter
+    additional_information: list
+        list of SED info variable names and likelihood functions for that variable,
+        [("sfh.sfr100Myrs", scipy.stats.norm(0, 1).logpdf), ...]
     """
 
-    def __init__(self, wobs, obs_fluxes, obs_errors, obs_filter_wavelength):
+    def __init__(self, wobs, obs_fluxes, obs_errors, obs_filter_wavelength, additional_likelihood_terms={}):
         self.cache_filters = {}
         self.last_parameters = None
         self.wobs = wobs
         self.obs_fluxes = obs_fluxes
         self.obs_errors = obs_errors
         self.obs_filter_wavelength = obs_filter_wavelength
+        self.additional_likelihood_terms = additional_likelihood_terms
         self.last_loglikelihood = None
 
     def __call__(self, parameters):
@@ -1210,6 +1214,8 @@ class ModelLikelihood(object):
             exponent=exponent, transmitted_fraction=transmitted_fraction)
 
         logl = -0.5 * chi2_ - norm
+        for k, likelihood_term in additional_likelihood_terms:
+            logl += likelihood_term(analysed_variables[k])
         # for a Gaussian(0,1) prior on log10(SFR), add
         # logl += -0.5 * (np.log10(sfr + 1e-4))**2
         self.last_parameters = parameters
