@@ -166,6 +166,9 @@ parser.add_argument(
 parser.add_argument(
     '--num-posterior-samples', type=int, default=50,
     help='number of posterior samples to analyse in post-processing')
+parser.add_argument(
+    '--num-live-points', type=int, default=50,
+    help='number of live points for nested sampling')
 
 parser.add_argument(
     '--plot', action='store_true',
@@ -1364,7 +1367,7 @@ def analyse_obs(samplername, obs, plot=True):
                 log_dir=outdir, resume='overwrite', derived_param_names=derived_param_names)
         print("  running without step sampler ...")
         sampler_args = dict(
-            frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=50,
+            frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=args.num_live_points,
             dlogz=10, min_ess=100, cluster_num_live_points=0, viz_callback=None
         )
         sampler.run(max_ncalls=10000, region_class=RobustEllipsoidRegion, **sampler_args)
