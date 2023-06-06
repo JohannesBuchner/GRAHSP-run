@@ -456,7 +456,7 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
         ax = plt.subplot(4, len(param_names) // 4 + 1, i + 1)
         bins = np.unique(list(set(prior_samples[:, i]).union(set(samples))))
         if not np.isfinite(bins).all():
-            print("WARNING: parameter %s is bad, remove it from the analysis list" % param_name)
+            print("WARNING: parameter %s is bad, removing it from the analysis list" % param_name, bins[~np.isfinite(bins)])
         if len(bins) > 2 and bins[-1] > bins[-2]:
             bins = np.concatenate((bins, [bins[-1] + bins[-1] - bins[-2]]))
         elif len(bins) == 1:
@@ -559,6 +559,8 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     chi2_best = 1e300
 
     posteriors_names = analysed_variables + ['chi2']
+    logmask = np.array(['lum' in v or 'sfr' in v or 'age' in v for v in analysed_variables])
+    logfunc = lambda x: np.where(logmask, np.log10(x), x)
     stellar_mass_column = []
     posteriors = []
     all_mod_fluxes = []
@@ -604,7 +606,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         norm, chi2_, total_variance = chi2_with_norm(
             mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error,
             NEV=sed.info['agn.NEV'], exponent=exponent, transmitted_fraction=transmitted_fraction)
-        posteriors.append(np.concatenate((np.log10(model_variables), [chi2_])))
+        posteriors.append(np.concatenate((logfunc(model_variables), [chi2_])))
         stellar_mass_column.append(stellar_mass)
 
         wavelength_spec = sed.wavelength_grid
@@ -1155,7 +1157,7 @@ class ModelLikelihood(object):
         [("sfh.sfr100Myrs", scipy.stats.norm(0, 1).logpdf), ...]
     """
 
-    def __init__(self, wobs, obs_fluxes, obs_errors, obs_filter_wavelength, additional_likelihood_terms={}):
+    def __init__(self, wobs, obs_fluxes, obs_errors, obs_filter_wavelength, additional_likelihood_terms=[]):
         self.cache_filters = {}
         self.last_parameters = None
         self.wobs = wobs
@@ -1219,8 +1221,8 @@ class ModelLikelihood(object):
             exponent=exponent, transmitted_fraction=transmitted_fraction)
 
         logl = -0.5 * chi2_ - norm
-        for k, likelihood_term in additional_likelihood_terms:
-            logl += likelihood_term(analysed_variables[k])
+        for analysed_variable_index, likelihood_term in self.additional_likelihood_terms:
+            logl += likelihood_term(model_variables[analysed_variable_index])
         # for a Gaussian(0,1) prior on log10(SFR), add
         # logl += -0.5 * (np.log10(sfr + 1e-4))**2
         self.last_parameters = parameters
@@ -1317,21 +1319,34 @@ def analyse_obs(samplername, obs, plot=True):
     print()
     if 'FAGN' in obs.keys() and 'FAGN_errlo' in obs.keys() and 'FAGN_errhi' in obs.keys():
         Finfo = (obs['FAGN'], obs['FAGN_errlo'], obs['FAGN_errhi'])
-        print("Using AGN flux constraint:", Finfo)
+        print("Including Gaussian AGN log-flux constraint:", Finfo)
     elif 'FAGN' in obs.keys() and 'FAGN_err' in obs.keys():
         Finfo = (obs['FAGN'], obs['FAGN_err'], obs['FAGN_err'])
-        print("Using AGN flux constraint:", Finfo)
+        print("Including Gaussian AGN log-flux constraint:", Finfo)
     else:
         Finfo = None
+    additional_likelihood_terms = []
+    for vi, v in enumerate(analysed_variables):
+        priorv = 'prior_' + v
+        if priorv not in obs.keys():
+            continue
+        if not ((priorv + '_errlo') in obs.keys() and (priorv + '_errhi') in obs.keys()):
+            assert False, ('error columns missing:', priorv + '_errlo', priorv + '_errhi')
+            continue
+        mid, sigma_lo, sigma_hi = float(obs[priorv]), float(obs[priorv + '_errlo']), float(obs[priorv + '_errhi'])
+        if not (np.isfinite(mid) and sigma_lo > 0 and sigma_hi > 0):
+            print("NOT including Gaussian constraint on '%s'" % v, (mid, sigma_lo, sigma_hi))
+            continue
+        print("Including Gaussian constraint on '%s'" % v, (mid, sigma_lo, sigma_hi))
+        def likelihood_term(x):
+            # print("likelihood term for", v, "value", x, mid, sigma_lo, sigma_hi)
+            return -0.5 * np.where(x < mid, (x - mid) / sigma_lo, (x - mid) / sigma_hi)**2
+        additional_likelihood_terms.append((vi, likelihood_term))
 
     prior_transform = make_prior_transform(rv_redshift, Finfo=Finfo, num_redshift_points=num_redshift_points)
 
     prior_samples = np.asarray([prior_transform(u) for u in np.random.uniform(size=(10000, len(active_param_names)))])
-    assert np.isfinite(prior_samples[0]).all(), (prior_samples[0])
-    assert np.isfinite(prior_samples).all(), (
-        np.where(~np.isfinite(prior_samples).all(axis=0)),
-        np.where(~np.isfinite(prior_samples).all(axis=1)),
-        prior_samples[~np.isfinite(prior_samples)])
+    assert np.isfinite(prior_samples).all()
 
     # select the filters from the list of active filters
 
@@ -1345,7 +1360,7 @@ def analyse_obs(samplername, obs, plot=True):
     obs_errors = obs_errors_full[wobs]
     obs_filter_wavelength = filters_wl_orig[wobs]
 
-    loglikelihood = ModelLikelihood(wobs, obs_fluxes, obs_errors, obs_filter_wavelength)
+    loglikelihood = ModelLikelihood(wobs, obs_fluxes, obs_errors, obs_filter_wavelength, additional_likelihood_terms=additional_likelihood_terms)
 
     outdir = "grahsp_%s_var%s%s%d" % (
         str(obs['id']).strip(),
