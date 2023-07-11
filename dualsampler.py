@@ -601,11 +601,11 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         _, chi2_0, _ = chi2_with_norm(
             mod_fluxes, agn_model_fluxes*0, obs_fluxes, obs_errors, obs_filter_wavelength * np.inf, redshift, sys_error * 0,
-            NEV=sed.info['agn.NEV'], exponent=exponent, transmitted_fraction=transmitted_fraction * 0 + 1)
+            NEV=sed.info.get('agn.NEV'), exponent=exponent, transmitted_fraction=transmitted_fraction * 0 + 1)
         chi2_best = min(chi2_0, chi2_best)
         norm, chi2_, total_variance = chi2_with_norm(
             mod_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error,
-            NEV=sed.info['agn.NEV'], exponent=exponent, transmitted_fraction=transmitted_fraction)
+            NEV=sed.info.get('agn.NEV'), exponent=exponent, transmitted_fraction=transmitted_fraction)
         posteriors.append(np.concatenate((logfunc(model_variables), [chi2_])))
         stellar_mass_column.append(stellar_mass)
 
@@ -798,15 +798,16 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         figure.savefig("%s/sed_%s.pdf" % (plot_dir, sed_type))
         plt.close(figure)
 
-    return (
-        param_names + posteriors_names,
-        np.concatenate((results['samples'].mean(axis=0), np.mean(posteriors, axis=0))),
-        np.concatenate((results['samples'].std(axis=0), np.std(posteriors, axis=0))),
-        np.concatenate((np.quantile(results['samples'], 0.02275, axis=0), np.quantile(posteriors, 0.02275, axis=0))),
-        np.concatenate((np.quantile(results['samples'], 0.97725, axis=0), np.quantile(posteriors, 0.97725, axis=0))),
-        np.concatenate((np.median(results['samples'], axis=0), np.median(posteriors, axis=0))),
-        np.concatenate((np.log(np.exp(results['samples']).mean(axis=0)), np.log(np.exp(posteriors).mean(axis=0)))),
-    )
+    with np.errstate(over='ignore'):
+        return (
+            param_names + posteriors_names,
+            np.concatenate((results['samples'].mean(axis=0), np.mean(posteriors, axis=0))),
+            np.concatenate((results['samples'].std(axis=0), np.std(posteriors, axis=0))),
+            np.concatenate((np.quantile(results['samples'], 0.02275, axis=0), np.quantile(posteriors, 0.02275, axis=0))),
+            np.concatenate((np.quantile(results['samples'], 0.97725, axis=0), np.quantile(posteriors, 0.97725, axis=0))),
+            np.concatenate((np.median(results['samples'], axis=0), np.median(posteriors, axis=0))),
+            np.concatenate((np.log(np.exp(results['samples']).mean(axis=0)), np.log(np.exp(posteriors).mean(axis=0)))),
+        )
 
 
 def make_prior_transform(rv_redshift, Finfo=None, num_redshift_points=40):
@@ -1217,7 +1218,7 @@ class ModelLikelihood(object):
         # compute likelihood:
         norm, chi2_, _ = chi2_with_norm(
             model_fluxes, agn_model_fluxes, self.obs_fluxes, self.obs_errors,
-            self.obs_filter_wavelength, redshift, sys_error, NEV=sed.info['agn.NEV'],
+            self.obs_filter_wavelength, redshift, sys_error, NEV=sed.info.get('agn.NEV'),
             exponent=exponent, transmitted_fraction=transmitted_fraction)
 
         logl = -0.5 * chi2_ - norm
