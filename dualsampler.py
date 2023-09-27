@@ -36,7 +36,7 @@ import argparse
 import numpy as np
 from numpy import log, log10
 import warnings
-from math import erf
+from scipy.special import erf
 from importlib import import_module
 import multiprocessing
 import joblib
@@ -65,10 +65,6 @@ from ultranest.mlfriends import SimpleRegion, RobustEllipsoidRegion
 from ultranest.plot import PredictionBand
 import ultranest.stepsampler
 import tqdm
-#import getdist
-#import getdist.plots
-#import getdist.chains
-#getdist.chains.print_load_details = False
 
 # some helper classes:
 
@@ -148,7 +144,21 @@ class HelpfulParser(argparse.ArgumentParser):
 
 parser = HelpfulParser(
     description=__doc__,
-    epilog="""Johannes Buchner (C) 2013-2023 <johannes.buchner.acad@gmx.com>""",
+    epilog="""
+
+Environment variables (see README):
+   MP_METHOD: parallelisation method
+   DB_IN_MEMORY: if 1, copy database to memory to avoid mutual blocking of processes.
+   CACHE_MAX: SED cache size
+   CACHE_VERBOSE: if 1, print when cache reaches maximum.
+   REPLOT: if 1, recompute existing plots even if resumed fit is unchanged
+   PLOT_FILTERNAMES: if 1, show name of filters with filter curves
+   PLOT_KEYSTATS: if 1, show key stats on the right of plot
+   PLOT_SFH: if 1, plot star formation history
+   OMP_NUM_THREAD
+   HDF5_USE_FILE_LOCKING
+
+Johannes Buchner (C) 2013-2023 <johannes.buchner.acad@gmx.com>""",
     formatter_class=argparse.RawDescriptionHelpFormatter
 )
 
@@ -526,31 +536,34 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
     plot_posteriors('%s/posteriors.pdf' % plot_dir, prior_samples, param_names, results['samples'])
 
-    """
-    print("making corner plot ...")
-    smooth_samples = sampler.results['samples'].copy()
-    for i in range(len(param_names)):
-        bins = np.unique(prior_samples[:, i]).tolist()
-        if len(bins) < 40:
-            if len(bins) == 1:
-                db = 1
-            else:
-                db = (bins[-1] - bins[-2])
-            for lo, hi in zip(bins, bins[1:] + [bins[-1] + db]):
-                mask = smooth_samples[:, i] == lo
-                smooth_samples[mask, i] = np.random.uniform(lo, hi, size=mask.sum())
-                #mask2 = prior_samples[:, i] == lo
+    if os.environ.get("PLOT_TRACE", "0") == "1":
+        print("making trace plot ...")
+        sampler.plot_trace()
+    if os.environ.get("PLOT_CORNER", "0") == "1":
+        print("making corner plot ...")
+        import getdist, getdist.plots, logging
+        smooth_samples = sampler.results['samples'].copy()
+        for i in range(len(param_names)):
+            bins = np.unique(prior_samples[:, i]).tolist()
+            if len(bins) < 40:
+                if len(bins) == 1:
+                    db = 1
+                else:
+                    db = (bins[-1] - bins[-2])
+                for lo, hi in zip(bins, bins[1:] + [bins[-1] + db]):
+                    mask = smooth_samples[:, i] == lo
+                    smooth_samples[mask, i] = np.random.uniform(lo, hi, size=mask.sum())
+                    #mask2 = prior_samples[:, i] == lo
 
-    samples = getdist.MCSamples(
-        samples=smooth_samples, names=param_names, sampler='nested',
-        settings=dict(smooth_scale_2D=0.3, smooth_scale_1D=0.3))
-    g = getdist.plots.get_subplot_plotter()
-    g.triangle_plot([samples])
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    plt.savefig('%s/corner.pdf' % plot_dir)
-    plt.close()
-    """
+        samples = getdist.MCSamples(
+            samples=smooth_samples, names=param_names, sampler='nested',
+            settings=dict(smooth_scale_2D=0.3, smooth_scale_1D=0.3))
+        g = getdist.plots.get_subplot_plotter()
+        g.triangle_plot([samples])
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        plt.savefig('%s/corner.pdf' % plot_dir)
+        plt.close()
 
     print("making SED instances for plotting ...")
     bands = {'lum': {}, 'mJy': {}}
@@ -567,6 +580,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     agn_mod_fluxes = []
     gal_mod_fluxes = []
     obs_filter_wavelength = filters_wl_orig[wobs]
+    sfhs = []
 
     for parameters in tqdm.tqdm(sampler.results['samples'][:args.num_posterior_samples, :]):
         stellar_mass = 10**parameters[-4]
@@ -578,6 +592,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         sed, gal_sed, agn_sed = scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN)
         sed.cache_filters = cache_filters
+        sfhs.append(gal_sed.sfh)
         agn_sed.cache_filters = cache_filters
         gal_sed.cache_filters = cache_filters
 
@@ -642,6 +657,41 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             bands[sed_type]['total'].add((sed.luminosity * sed_multiplier))
 
     posteriors = np.array(posteriors)
+    if all((param in param_names for param in ['log_L_AGN', 'log_stellar_mass', 'log_biattenuation_E(B-V)', 'log_biattenuation_E(B-V)-AGN'])) and \
+       all((param in posteriors_names for param in ['sfh.sfr'])):
+        posterior_summary_text = r'''
+$m_\star$=
+%.1f
+$_{\pm%.1f}$
+
+sfr=
+%.1f
+$_{\pm%.1f}$
+
+E$_\mathrm{B-V}^\mathrm{gal}$=
+%.1f$_{\pm%.1f}$
+
+$l_\mathrm{AGN}$=
+%.1f
+$_{\pm%.1f}$
+
+E$_\mathrm{B-V}^\mathrm{AGN}$=
+%.1f$_{\pm%.1f}$''' % (
+            np.log10(10**results['samples'][:,param_names.index('log_stellar_mass')].mean()),
+            results['samples'][:,param_names.index('log_stellar_mass')].std(),
+            np.log10(10**posteriors[:,posteriors_names.index('sfh.sfr')].mean()),
+            posteriors[:,posteriors_names.index('sfh.sfr')].std(),
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)')]).mean(),
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)')]).std(),
+            np.log10(10**results['samples'][:,param_names.index('log_L_AGN')]).mean(),
+            results['samples'][:,param_names.index('log_L_AGN')].std(),
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)-AGN')]).mean(),
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)-AGN')]).std(),
+        )
+    else:
+        print(posteriors_names)
+        posterior_summary_text = 'N/A'
+
     # add specific (normalised by stellar mass) AGN luminosities
     for i, n in enumerate(list(posteriors_names)):
         if 'agn.lum' in n or 'Lbol' in n or 'sfh.sfr' in n:
@@ -650,6 +700,7 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
     # print("   +specific:", len(posteriors_names), posteriors_names)
     plot_posteriors('%s/derived.pdf' % plot_dir, np.zeros((0, len(posteriors_names))), posteriors_names, posteriors)
     # add model fluxes as output columns
+    mod_fluxes = np.mean(all_mod_fluxes, axis=0)
     posteriors = np.hstack((posteriors, all_mod_fluxes, agn_mod_fluxes, gal_mod_fluxes))
     posteriors_names += ['totalflux_' + filtername for filtername in filters]
     posteriors_names += ['AGNflux_' + filtername for filtername in filters]
@@ -659,14 +710,15 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
     for sed_type in 'mJy', 'lum':
         print("  plotting", sed_type, ', writing out as CSV file ...')
-        filters_wl = filters_wl_orig[wobs] / 1000
+        filters_wl = filters_wl_orig / 1000
         # wsed = np.where((wavelength_spec2 > xmin) & (wavelength_spec2 < xmax))
 
         figure = plt.figure()
-        gs = gridspec.GridSpec(2, 1, height_ratios=[4, 1], hspace=0.02)
+        gs = gridspec.GridSpec(3, 1, height_ratios=[0.2, 8, 2], hspace=0.0)
 
-        ax1 = plt.subplot(gs[0])
-        ax2 = plt.subplot(gs[1])
+        ax1 = plt.subplot(gs[1])
+        ax2 = plt.subplot(gs[2])
+        ax3 = plt.subplot(gs[0])
 
         plt.sca(ax1)
 
@@ -701,15 +753,15 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
             filters_wl /= 1. + z
             k_corr_SED = 1e-29 * (4. * np.pi * DL * DL) * c / (filters_wl * 1e-9) / 1000
-            obs_fluxes = obs_fluxes * k_corr_SED
-            obs_fluxes_err = obs_errors * k_corr_SED
+            obs_fluxes = obs_fluxes * k_corr_SED[wobs]
+            obs_fluxes_err = obs_errors * k_corr_SED[wobs]
             mod_fluxes = mod_fluxes * k_corr_SED
-            mod_fluxes_err = total_variance**0.5 * k_corr_SED
+            mod_fluxes_err = total_variance**0.5 * k_corr_SED[wobs]
         elif sed_type == 'mJy':
             xmin = PLOT_L_MIN
             xmax = PLOT_L_MAX
 
-            k_corr_SED = 1.
+            k_corr_SED = np.ones_like(filters_wl)
             obs_fluxes_err = obs_errors
             mod_fluxes_err = total_variance**0.5
 
@@ -717,44 +769,49 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
         ax1.scatter(filters_wl, mod_fluxes, marker='o', color='r', s=8,
                     zorder=3, label="Model fluxes")
         mask_ok = np.logical_and(obs_fluxes > 0., obs_errors > 0.)
-        ax1.errorbar(filters_wl[mask_ok], obs_fluxes[mask_ok],
+        ax1.errorbar(filters_wl[wobs][mask_ok], obs_fluxes[mask_ok],
                      yerr=mod_fluxes_err[mask_ok] * 3, ls='',
                      markersize=6, color='b', capsize=2., elinewidth=1)
-        ax1.errorbar(filters_wl[mask_ok], obs_fluxes[mask_ok],
+        ax1.errorbar(filters_wl[wobs][mask_ok], obs_fluxes[mask_ok],
                      yerr=obs_fluxes_err[mask_ok] * 3, ls='', marker='s',
                      label='Observed fluxes', markerfacecolor='None',
                      markersize=6, color='b', capsize=4., elinewidth=1)
         mask_uplim = np.logical_and(np.logical_and(obs_fluxes > 0.,
                                                obs_fluxes_err < 0.),
-                                obs_fluxes_err > -9990. * k_corr_SED)
+                                obs_fluxes_err > -9990. * k_corr_SED[wobs])
 
         if not mask_uplim.any() == False:
-            ax1.errorbar(filters_wl[mask_uplim], obs_fluxes[mask_uplim],
-                         yerr=obs_fluxes_err[mask_uplim], ls='',
+            ax1.errorbar(x=filters_wl[wobs][mask_uplim], y=obs_fluxes[mask_uplim],
+                         yerr=np.abs(obs_fluxes_err[mask_uplim]) * 3,
                          marker='v', label='Observed upper limits',
                          markerfacecolor='None', markersize=6,
-                         markeredgecolor='g',
+                         color='navy',
+                         capsize=4, linestyle=' ', elinewidth=1)
+            ax1.errorbar(x=filters_wl[wobs][mask_uplim], y=obs_fluxes[mask_uplim],
+                         yerr=np.abs(mod_fluxes_err[mask_uplim]) * 3,
+                         marker=' ', color='navy',
                          capsize=2, linestyle=' ', elinewidth=1)
         mask_noerr = np.logical_and(obs_fluxes > 0.,
-                                    obs_fluxes_err < -9990. * k_corr_SED)
+                                    obs_fluxes_err < -9990. * k_corr_SED[wobs])
         if not mask_noerr.any() == False:
-            ax1.errorbar(filters_wl[mask_noerr], obs_fluxes[mask_noerr],
-                         ls='', marker='s', markerfacecolor='None',
+            ax1.errorbar(filters_wl[wobs][mask_noerr], obs_fluxes[mask_noerr],
+                         marker='s', markerfacecolor='None',
                          markersize=6, markeredgecolor='r',
                          label='Observed fluxes, no errors',
                          capsize=2, linestyle=' ', elinewidth=1)
-        mask, = np.where(obs_fluxes > 0.)
-        ax2.errorbar(filters_wl[mask],
-                     (obs_fluxes[mask]-mod_fluxes[mask])/obs_fluxes[mask],
-                     yerr=obs_fluxes_err[mask]/obs_fluxes[mask],
-                     marker='x', color='k',
+        # residuals:
+        ax2.errorbar(x=filters_wl[wobs][mask_ok],
+                     y=(obs_fluxes[mask_ok]-mod_fluxes[wobs][mask_ok])/obs_fluxes[mask_ok],
+                     yerr=obs_fluxes_err[mask_ok]/obs_fluxes[mask_ok],
+                     marker='o', color='k', ms=2,
                      capsize=2, linestyle=' ', elinewidth=1)
-        if mask.any():
-            maxresid = max(1, max(np.abs((obs_fluxes[mask]-mod_fluxes[mask])/obs_fluxes[mask])))
+        if mask_ok.any():
+            maxresid = max(1.1, max(np.abs((obs_fluxes[mask_ok]-mod_fluxes[wobs][mask_ok])/obs_fluxes[mask_ok])))
         else:
-            maxresid = 3.0
-        ax2.plot([xmin, xmax], [0., 0.], ls='--', color='k')
+            maxresid = 3.1
+        ax2.plot([xmin, xmax], [0., 0.], ls='--', color='k', lw=0.2)
         ax2.set_xscale('log')
+        ax3.set_xscale('log')
         ax1.set_xscale('log')
         ax2.minorticks_on()
 
@@ -762,18 +819,55 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
         ax1.set_xlim(xmin, xmax)
         ax2.set_xlim(xmin, xmax)
+        ax3.set_xlim(xmin, xmax)
+        ax3.set_ylim(0, 1.0)
+        ax3.axis('off')
+        colors = {}
+        with Database() as base:
+            for name, used in zip([filters[i] for i in wobs], np.logical_or(mask_ok, np.logical_or(mask_noerr, mask_uplim))):
+                if not used: continue
+                f = base.get_filter(name.rstrip('_'))
+                if '_' in name:
+                    # take off band if _z for example
+                    instrument_name = '_'.join(name.split('_')[:-1])
+                else:
+                    # take off digit at the end, like WISE3 for example
+                    instrument_name = ''.join(character for character in name
+                        if not character.isdigit())
+                pretty_name = instrument_name if instrument_name != '' else ('?' + name)
+                color = colors.get(pretty_name)
+                legend_name = None if pretty_name in colors else pretty_name
+                if sed_type == 'lum':
+                    wl = f.trans_table[0] / (1. + z) / 1000
+                    wl_eff = f.effective_wavelength / (1. + z) / 1000
+                else:
+                    wl = f.trans_table[0] / 1000
+                    wl_eff = f.effective_wavelength / 1000
+                transmission = f.trans_table[1] / f.trans_table[1].max()
+
+                l, = ax3.plot(wl, transmission, color=color, lw=1)
+                if legend_name is not None and os.environ.get('PLOT_FILTERNAMES', '0') == '1':
+                    ax3.text(
+                        wl_eff, 1.0, legend_name, size=6,
+                        color=l.get_color(), va='bottom', ha='left')
+                colors[pretty_name] = l.get_color()
+        
+        #ax3.legend()
+        
+        ax1.tick_params(which='both', labelbottom=False, labelright=False, top=True, right=True, direction="inout")
+        # plot filter curves
         if mask_ok.any():
             ymin = min(np.nanmin(obs_fluxes[mask_ok]),
-                       np.nanmin(mod_fluxes[mask_ok]))
+                       np.nanmin(mod_fluxes[wobs][mask_ok]))
 
             if not mask_uplim.any() == False:
                 ymax = max(max(np.nanmax(obs_fluxes[mask_ok]),
                                np.nanmax(obs_fluxes[mask_uplim])),
-                           max(np.nanmax(mod_fluxes[mask_ok]),
-                               np.nanmax(mod_fluxes[mask_uplim])))
+                           max(np.nanmax(mod_fluxes[wobs][mask_ok]),
+                               np.nanmax(mod_fluxes[wobs][mask_uplim])))
             else:
                 ymax = max(np.nanmax(obs_fluxes[mask_ok]),
-                           np.nanmax(mod_fluxes[mask_ok]))
+                           np.nanmax(mod_fluxes[wobs][mask_ok]))
             if np.isinf(ymax):
                 ymax = 100 * ymin
             if np.isinf(ymin) or ymin < 1e-6 * ymax:
@@ -781,6 +875,18 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             ax1.set_ylim(1e-2*ymin, 1e1*ymax)
         ax1.set_yscale('log')
         ax2.set_ylim(-maxresid, maxresid)
+        if sed_type == "mJy":
+            # set right hand ticks in mag AB with round numbers
+            ABmax = -2.5 * np.log10(ax1.get_ylim()[0] / 3631000)
+            ABmin = -2.5 * np.log10(ax1.get_ylim()[1] / 3631000)
+            ytick_ABs = np.arange(int(np.ceil(ABmin)), int(np.floor(ABmax)) + 1)
+            ytick_fluxes_mJy = 3631000 * 10**(ytick_ABs / -2.5)
+            ax_r = ax1.secondary_yaxis('right')
+            ax_r.set_ylim(1e-2*ymin, 1e1*ymax)
+            ax_r.set_yscale('log')
+            ax_r.set_yticks([1, 1.5], [1, 1.5], color="darkgrey")
+            ax_r.set_yticks(ytick_fluxes_mJy, ytick_ABs, color="darkgrey")
+            plt.sca(ax1)
         if sed_type == 'lum':
             ax2.set_xlabel("Rest-frame wavelength [$\\mu$m]")
             ax1.set_ylabel("Luminosity [W]")
@@ -790,11 +896,39 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             ax1.set_ylabel("Flux [mJy]")
             ax2.set_ylabel("(Obs-Mod)/Obs", size=8)
         ax1.legend(fontsize=6, loc='best', fancybox=True, framealpha=0.5)
-        plt.setp(ax1.get_xticklabels(), visible=False)
-        plt.setp(ax1.get_yticklabels()[1], visible=False)
         figure.suptitle(
             "%s at z=%.3f, $\chi^2_{/n}$=%.1f/%d Z=%.1f" %
             (obs['id'], obs['redshift'], chi2_best, len(obs_fluxes), Z))
+        if sed_type == "lum":
+            if os.environ.get("PLOT_KEYSTATS", "1") == "1":
+                plt.figtext(0.91, 0.28, posterior_summary_text, fontsize=10, va='bottom', fontfamily="serif")
+            if os.environ.get("PLOT_SFH", "1") == "1":
+                ax_sfh = figure.add_axes([0.915, 0.12, 0.08, 0.1])
+                print(sfhs[0].shape, sfhs[0])
+                band = PredictionBand(np.arange(14000) / 1000.)
+                max_age = max([len(sfh) for sfh in sfhs]) / 1000.
+                max_age = 3
+                for sfh in sfhs:
+                    y = np.zeros_like(band.x)
+                    y[-len(sfh):] = sfh
+                    # band.add(y / y.mean())
+                    plt.plot(band.x, y / y.max(), color='blue', lw=0.2, alpha=0.5)
+                #band.shade(0.495, color="blue", alpha=0.05)
+                #band.shade(0.475, color="blue", alpha=0.05)
+                #band.shade(0.45, color="blue", alpha=0.05)
+                #band.line(color="blue")
+                #ax_sfh.set_xscale('log')
+                #ax_sfh.set_xticks([0.01, 1], ["10 Myr", "1 Gyr"], fontsize=6)
+                ax_sfh.set_xticks([10], ["10 Gyr"], fontsize=6)
+                ax_sfh.set_xticks(np.arange(0, 13), minor=True)
+                #ax_sfh.set_xlim(0.01, max_age)
+                ax_sfh.yaxis.set_visible(False)
+                ax_sfh.xaxis.set_ticks_position('bottom')
+                ax_sfh.spines['top'].set_visible(False)
+                ax_sfh.spines['right'].set_visible(False)
+                #ax_sfh.spines['left'].set_visible(False)
+                ax_sfh.tick_params(axis='both', labelsize=6)
+                plt.sca(ax1)
         figure.savefig("%s/sed_%s.pdf" % (plot_dir, sed_type))
         plt.close(figure)
 
@@ -1025,6 +1159,9 @@ def generate_fluxes(Ngen=100000):
     tout = Table(data=fluxdata, names=param_names + analysed_variables + filters)
     tout.write('model_fluxes.fits', overwrite=True)
 
+def chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
+    erf_result = erf((obs_fluxes-model_fluxes) / (np.sqrt(2) * (total_variance)))
+    return -2.0 * log(0.5 * (1 - erf_result) + 1e-300)
 
 def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, transmitted_fraction, exponent=2):
     """Likelihood considering all variance contributions.
@@ -1083,7 +1220,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
     mask_lim = np.logical_and(obs_errors >= -9990., obs_errors < TOLERANCE)
 
     # (1) variance from observation, according to the reported errors
-    obs_variance = obs_errors[mask_data]**2
+    obs_variance = obs_errors**2
 
     # (2) variance from year-to-year variability (Simm+ paper)
     if variability_uncertainty:
@@ -1126,16 +1263,15 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
 
     # compute chi^2 and the Gaussian likelihood normalisation
     chi2_ = np.sum(
-        ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance)**(exponent/2.0))
+        ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance[mask_data])**(exponent/2.0))
     norm = 0.5 * np.log(2 * np.pi * total_variance**(exponent/2.0)).sum()
 
     if mask_lim.any():
-        uplim_errors = (-obs_errors[mask_lim])**2 + sys_variance + var_variance
-        chi2_ += -2. * log(
-                np.sqrt(np.pi/2.)*(-obs_errors[mask_lim])*(
-                    1.+erf(
-                        (obs_fluxes[mask_lim]-model_fluxes[mask_lim]) /
-                        (np.sqrt(2)*(uplim_errors))))).sum()
+        chi2_ += chi2_upper_limit(
+            obs_fluxes[mask_lim],
+            model_fluxes[mask_lim],
+            total_variance[mask_lim]).sum()
+
     return norm, chi2_, total_variance
 
 
@@ -1167,13 +1303,31 @@ class ModelLikelihood(object):
         self.obs_filter_wavelength = obs_filter_wavelength
         self.additional_likelihood_terms = additional_likelihood_terms
         self.last_loglikelihood = None
+        self.sampler = None
+        self.counter_early_reject = 0
+        self.counter_avoid_recompute_of_same = 0
+        self.counter_unphysical_reject = 0
+        self.counter_calls = 0
+
+    def stats(self):
+        """Return statistics on computational effort."""
+        return 'calls: %d, %d were repeat calls, %d had unphysical age, %d dismissed from first band fit alone' % (
+            self.counter_calls,
+            self.counter_avoid_recompute_of_same,
+            self.counter_unphysical_reject,
+            self.counter_early_reject,
+        )
+
 
     def __call__(self, parameters):
         """Fitting likelihood function"""
 
+        
+        self.counter_calls += 1
         # if we are called with the same values again, return what we just computed
         # this can happen because the parameters are binned
         if self.last_parameters is not None and np.all(self.last_parameters == parameters):
+            self.counter_avoid_recompute_of_same += 1
             return self.last_loglikelihood
 
         # get the normalisation parameters
@@ -1190,30 +1344,53 @@ class ModelLikelihood(object):
         sed.cache_filters = self.cache_filters
         agn_sed.cache_filters = self.cache_filters
 
-        model_fluxes_full, model_variables = compute_model_fluxes(sed, filters)
-        sfr = model_variables[analysed_variables.index('sfh.sfr100Myrs')]
-        if not 0 <= sfr <= args.sfr_max:
+        sfr = sed.info['sfh.sfr100Myrs']
+        if sed.info['sfh.age'] > sed.info['universe.age'] or not 0 <= sfr <= args.sfr_max:
             # excluded by exceeding age of Universe
             # assign lower number for those further away from the constraints
             logl = -1e20 * (np.log10(stellar_mass) + abs(sfr) + max(0, sed.info['sfh.age'] - sed.info['universe.age']))
             #print("violation", (0, sfr, args.sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
             self.last_parameters = parameters
             self.last_loglikelihood = logl
+            self.counter_unphysical_reject += 1
             return logl
-
-        for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
-            module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
-            module_instance.process(agn_sed)
-
-        agn_model_fluxes_full, _ = compute_model_fluxes(agn_sed, filters)
-        agn_model_fluxes = agn_model_fluxes_full[self.wobs]
-        model_fluxes = model_fluxes_full[self.wobs]
 
         # get fraction of non-attenuated flux at the filters
         filter_wl_indices = np.searchsorted(sed.wavelength_grid, filters_wl_orig[self.wobs])
         filter_contrib = sed.luminosities[:, filter_wl_indices]
         filter_pos_contrib = np.where(filter_contrib > 0, filter_contrib, 0).sum(axis=0)
         transmitted_fraction = filter_contrib.sum(axis=0) / filter_pos_contrib
+
+        filters_observed = [filters[i] for i in self.wobs]
+
+        # shortcut: compute likelihood with only first filter band
+        if False and self.obs_errors[0] > TOLERANCE and len(self.additional_likelihood_terms) == 0 and not variability_uncertainty:
+            # adopt the best case for other bands: observed flux or zero
+            mask_lim = np.logical_and(self.obs_errors >= -9990., self.obs_errors < TOLERANCE)
+            model_fluxes = np.where(mask_lim, 0, self.obs_fluxes)
+            model_fluxes[0], model_variables = compute_model_fluxes(sed, [filters_observed[0]])
+            norm0, chi2_0, _ = chi2_with_norm(
+                model_fluxes, model_fluxes * np.nan, self.obs_fluxes, self.obs_errors,
+                self.obs_filter_wavelength, redshift, sys_error, NEV=sed.info.get('agn.NEV'),
+                exponent=exponent, transmitted_fraction=transmitted_fraction)
+
+            logl0 = -0.5 * chi2_0 - norm0
+            if logl0 < getattr(self.sampler, 'Lmin', -np.inf):
+                self.counter_early_reject += 1
+                return logl0
+            
+            model_fluxes[1:], _ = compute_model_fluxes(sed, filters_observed[1:])
+        else:
+            model_fluxes, model_variables = compute_model_fluxes(sed, filters_observed)
+
+        # do costly AGN flux filter computation only if used
+        if variability_uncertainty:
+            for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
+                module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
+                module_instance.process(agn_sed)
+            agn_model_fluxes, _ = compute_model_fluxes(agn_sed, filters_observed)
+        else:
+            agn_model_fluxes = model_fluxes * np.nan
 
         # compute likelihood:
         norm, chi2_, _ = chi2_with_norm(
@@ -1224,8 +1401,6 @@ class ModelLikelihood(object):
         logl = -0.5 * chi2_ - norm
         for analysed_variable_index, likelihood_term in self.additional_likelihood_terms:
             logl += likelihood_term(model_variables[analysed_variable_index])
-        # for a Gaussian(0,1) prior on log10(SFR), add
-        # logl += -0.5 * (np.log10(sfr + 1e-4))**2
         self.last_parameters = parameters
         self.last_loglikelihood = logl
         return logl
@@ -1356,7 +1531,7 @@ def analyse_obs(samplername, obs, plot=True):
         obs_fluxes_full = np.array([obs[name] for name in filters])
         obs_errors_full = np.array([obs[name + "_err"] for name in filters])
 
-    wobs = np.where(obs_fluxes_full > TOLERANCE)
+    wobs, = np.where(obs_fluxes_full > TOLERANCE)
     obs_fluxes = obs_fluxes_full[wobs]
     obs_errors = obs_errors_full[wobs]
     obs_filter_wavelength = filters_wl_orig[wobs]
@@ -1390,6 +1565,7 @@ def analyse_obs(samplername, obs, plot=True):
                 active_param_names, loglikelihood, prior_transform,
                 log_dir=outdir, resume='overwrite', derived_param_names=derived_param_names)
         print("  running without step sampler ...")
+        loglikelihood.sampler = sampler
         sampler_args = dict(
             frac_remain=0.5, max_num_improvement_loops=0, min_num_live_points=args.num_live_points,
             dlogz=10, min_ess=100, cluster_num_live_points=0, viz_callback=None
@@ -1399,6 +1575,7 @@ def analyse_obs(samplername, obs, plot=True):
         sampler.stepsampler = ultranest.stepsampler.SliceSampler(
             nsteps=20, generate_direction=ultranest.stepsampler.generate_mixture_random_direction)
         sampler.run(region_class=SimpleRegion, **sampler_args)
+        print('loglikelihood stats:', loglikelihood.stats())
         sampler.print_results()
     if plot:
         results = plot_results(
@@ -1434,7 +1611,8 @@ def main():
         # Read the observation table and complete it by adding error where
         # none is provided and by adding the systematic deviation.
         obs_table = complete_obs_table(read_table(data_file), column_list,
-                                       filters, TOLERANCE, lim_flag)
+                                       filters, TOLERANCE, lim_flag, 
+                                       systematic_deviation=0.1)
 
         # pick observations to analyse in this process
         obs_table_here = obs_table[args.offset::args.every]
