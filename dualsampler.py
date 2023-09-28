@@ -902,7 +902,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
         if sed_type == "lum":
             if os.environ.get("PLOT_KEYSTATS", "1") == "1":
                 plt.figtext(0.91, 0.28, posterior_summary_text, fontsize=10, va='bottom', fontfamily="serif")
-            if os.environ.get("PLOT_SFH", "1") == "1":
+            if os.environ.get("PLOT_SFH", "0") == "1":
                 ax_sfh = figure.add_axes([0.915, 0.12, 0.08, 0.1])
                 print(sfhs[0].shape, sfhs[0])
                 band = PredictionBand(np.arange(14000) / 1000.)
