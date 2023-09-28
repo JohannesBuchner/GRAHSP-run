@@ -44,6 +44,7 @@ import joblib
 import scipy.stats
 from scipy.constants import c
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import matplotlib.gridspec as gridspec
 
 import pcigale
@@ -482,9 +483,28 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
                 density=True, bins=bins, color='gray', ls='-', lw=1, alpha=0.5)
         plt.xlim(xlo, xhi)
         plt.yticks([])
-        plt.xlabel(('' if i % 2 == 0 else "\n") + param_names[i])
         ax.spines[['right', 'top', 'left']].set_visible(False)
         ax.get_xaxis().tick_bottom()
+        plt.xlabel(('' if i % 2 == 0 else "\n") + param_name)
+        xticks, _ = plt.xticks()
+        if param_name.startswith('log_') and xhi < 5:
+            print(param_name, xticks)
+            if np.allclose(xticks, xticks.astype(int)):
+                plt.xticks(xticks, ['%g' % (10**xi) for xi in xticks])
+                plt.xlabel(('' if i % 2 == 0 else "\n") + param_name[4:])
+            elif xhi - xlo < 2:
+                xspan = xhi - xlo
+                sigfig = int(np.ceil(xspan))
+                fmt = '%%.%df' % sigfig
+                xticklo = np.round(10**(xlo + 0.2 * xspan), sigfig)
+                xtickmid = np.round(10**(xlo + 0.5 * xspan), sigfig)
+                xtickhi = np.round(10**(xlo + 0.8 * xspan), sigfig)
+                print(param_name, sigfig, xticklo, xtickhi)
+                plt.xticks(
+                    [np.log10(xticklo), np.log10(xtickmid), np.log10(xtickhi)],
+                    [fmt % xticklo, fmt % xtickmid, fmt % xtickhi])
+                plt.xlabel(('' if i % 2 == 0 else "\n") + param_name[4:])
+        plt.xlim(xlo, xhi)
 
     plt.subplots_adjust(wspace=0.1, hspace=0.7)
     plt.savefig(filename, bbox_inches='tight')
@@ -820,6 +840,8 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
         ax1.set_xlim(xmin, xmax)
         ax2.set_xlim(xmin, xmax)
         ax3.set_xlim(xmin, xmax)
+        #ax2.get_xaxis().get_major_formatter().labelOnlyBase = False
+        ax2.get_xaxis().set_major_formatter(mpl.ticker.ScalarFormatter())
         ax3.set_ylim(0, 1.0)
         ax3.axis('off')
         colors = {}
@@ -898,36 +920,29 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
         ax1.legend(fontsize=6, loc='best', fancybox=True, framealpha=0.5)
         figure.suptitle(
             "%s at z=%.3f, $\chi^2_{/n}$=%.1f/%d Z=%.1f" %
-            (obs['id'], obs['redshift'], chi2_best, len(obs_fluxes), Z))
+            (obs['id'], obs['redshift'], chi2_best, len(obs_fluxes), Z),
+            y=0.95)
         if sed_type == "lum":
             if os.environ.get("PLOT_KEYSTATS", "1") == "1":
-                plt.figtext(0.91, 0.28, posterior_summary_text, fontsize=10, va='bottom', fontfamily="serif")
+                plt.figtext(0.91, 0.28, posterior_summary_text, fontsize=10,
+                    va='bottom', fontfamily="serif", fontvariant='small-caps')
             if os.environ.get("PLOT_SFH", "0") == "1":
-                ax_sfh = figure.add_axes([0.915, 0.12, 0.08, 0.1])
+                ax_sfh = figure.add_axes([0.915, 0.11, 0.08, 0.1])
                 print(sfhs[0].shape, sfhs[0])
                 band = PredictionBand(np.arange(14000) / 1000.)
-                max_age = max([len(sfh) for sfh in sfhs]) / 1000.
-                max_age = 3
                 for sfh in sfhs:
                     y = np.zeros_like(band.x)
-                    y[-len(sfh):] = sfh
-                    # band.add(y / y.mean())
+                    y[:len(sfh)] = sfh[::-1]
                     plt.plot(band.x, y / y.max(), color='blue', lw=0.2, alpha=0.5)
-                #band.shade(0.495, color="blue", alpha=0.05)
-                #band.shade(0.475, color="blue", alpha=0.05)
-                #band.shade(0.45, color="blue", alpha=0.05)
-                #band.line(color="blue")
-                #ax_sfh.set_xscale('log')
-                #ax_sfh.set_xticks([0.01, 1], ["10 Myr", "1 Gyr"], fontsize=6)
-                ax_sfh.set_xticks([10], ["10 Gyr"], fontsize=6)
-                ax_sfh.set_xticks(np.arange(0, 13), minor=True)
-                #ax_sfh.set_xlim(0.01, max_age)
+                ax_sfh.set_title('SFH', size=8, loc='left')
                 ax_sfh.yaxis.set_visible(False)
                 ax_sfh.xaxis.set_ticks_position('bottom')
                 ax_sfh.spines['top'].set_visible(False)
                 ax_sfh.spines['right'].set_visible(False)
-                #ax_sfh.spines['left'].set_visible(False)
-                ax_sfh.tick_params(axis='both', labelsize=6)
+                ax_sfh.set_xticks([0, 1, 2, 10], [0, 1, 2, 10], fontsize=6)
+                ax_sfh.set_xlim(0, 3)
+                ax_sfh.set_xlabel('Age [Gyr]', size=8)
+                
                 plt.sca(ax1)
         figure.savefig("%s/sed_%s.pdf" % (plot_dir, sed_type))
         plt.close(figure)
