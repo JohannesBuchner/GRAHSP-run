@@ -33,15 +33,17 @@ with a systematic scatter of +-0.43 dex (Koss+2017).
 import os
 import sys
 import argparse
+import warnings
+import itertools
+from importlib import import_module
+
 import numpy as np
 from numpy import log, log10
-import warnings
-from scipy.special import erf
-from importlib import import_module
 import multiprocessing
 import joblib
 
 import scipy.stats
+import scipy.special
 from scipy.constants import c
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -270,11 +272,33 @@ def list_filters():
             f = base.get_filter(filter_name)
             print(f)
 
+def get_filtergroup_name(filtername):
+    if '_' in filtername:
+        # take off band if _z or _Ks for example
+        instrument_name = '_'.join(filtername.split('_')[:-1])
+    else:
+        # take off digit at the end, like WISE3 for example
+        instrument_name = ''.join(character for character in filtername
+            if not character.isdigit())
+    if instrument_name != '':
+        return instrument_name
+    else:
+        return filtername
 
 # get list of user-selected filters
 filters = [name for name in column_list if not name.endswith('_err')]
 with Database() as base:
     filters_wl_orig = np.array([base.get_filter(name.rstrip('_')).effective_wavelength for name in filters])
+    filters_colors = []
+    default_color_cycle = itertools.cycle(plt.rcParams['axes.prop_cycle'].by_key()['color'])
+    filtergroups_colors = {}
+    for filtername in filters:
+        filtergroup_name = get_filtergroup_name(filtername)
+        if filtergroup_name not in filtergroups_colors:
+            filtergroups_colors[filtergroup_name] = next(default_color_cycle)
+        filters_colors.append(filtergroups_colors[filtergroup_name])
+        del filtername, filtergroup_name
+    del default_color_cycle
 n_filters = len(filters)
 
 # show chosen parameters to the user, in latex file and screen
@@ -840,25 +864,18 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
         ax1.set_xlim(xmin, xmax)
         ax2.set_xlim(xmin, xmax)
         ax3.set_xlim(xmin, xmax)
-        #ax2.get_xaxis().get_major_formatter().labelOnlyBase = False
         ax2.get_xaxis().set_major_formatter(mpl.ticker.ScalarFormatter())
         ax3.set_ylim(0, 1.0)
         ax3.axis('off')
-        colors = {}
         with Database() as base:
-            for name, used in zip([filters[i] for i in wobs], np.logical_or(mask_ok, np.logical_or(mask_noerr, mask_uplim))):
+            legend_names_seen = set()
+            for filtername, used in zip([filters[i] for i in wobs], np.logical_or(mask_ok, np.logical_or(mask_noerr, mask_uplim))):
                 if not used: continue
-                f = base.get_filter(name.rstrip('_'))
-                if '_' in name:
-                    # take off band if _z for example
-                    instrument_name = '_'.join(name.split('_')[:-1])
-                else:
-                    # take off digit at the end, like WISE3 for example
-                    instrument_name = ''.join(character for character in name
-                        if not character.isdigit())
-                pretty_name = instrument_name if instrument_name != '' else ('?' + name)
-                color = colors.get(pretty_name)
-                legend_name = None if pretty_name in colors else pretty_name
+                f = base.get_filter(filtername.rstrip('_'))
+                filtergroup_name = get_filtergroup_name(filtername)
+                color = filtergroups_colors.get(filtergroup_name)
+                legend_name = None if filtergroup_name in legend_names_seen else filtergroup_name
+                legend_names_seen.add(filtergroup_name)
                 if sed_type == 'lum':
                     wl = f.trans_table[0] / (1. + z) / 1000
                     wl_eff = f.effective_wavelength / (1. + z) / 1000
@@ -871,8 +888,8 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
                 if legend_name is not None and os.environ.get('PLOT_FILTERNAMES', '0') == '1':
                     ax3.text(
                         wl_eff, 1.0, legend_name, size=6,
-                        color=l.get_color(), va='bottom', ha='left')
-                colors[pretty_name] = l.get_color()
+                        color=color, va='bottom', ha='left')
+            del legend_names_seen
         
         #ax3.legend()
         
@@ -901,10 +918,10 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
             # set right hand ticks in mag AB with round numbers
             ABmax = -2.5 * np.log10(ax1.get_ylim()[0] / 3631000)
             ABmin = -2.5 * np.log10(ax1.get_ylim()[1] / 3631000)
-            ytick_ABs = np.arange(int(np.ceil(ABmin)), int(np.floor(ABmax)) + 1)
+            ytick_ABs = np.arange(int(np.ceil(min(35,ABmin))), int(np.floor(min(10,ABmax))) + 1)
             ytick_fluxes_mJy = 3631000 * 10**(ytick_ABs / -2.5)
             ax_r = ax1.secondary_yaxis('right')
-            ax_r.set_ylim(1e-2*ymin, 1e1*ymax)
+            ax_r.set_ylim(ax1.get_ylim())
             ax_r.set_yscale('log')
             ax_r.set_yticks([1, 1.5], [1, 1.5], color="darkgrey")
             ax_r.set_yticks(ytick_fluxes_mJy, ytick_ABs, color="darkgrey")
@@ -1175,7 +1192,7 @@ def generate_fluxes(Ngen=100000):
     tout.write('model_fluxes.fits', overwrite=True)
 
 def chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
-    erf_result = erf((obs_fluxes-model_fluxes) / (np.sqrt(2) * (total_variance)))
+    erf_result = scipy.special.erf((obs_fluxes-model_fluxes) / (np.sqrt(2) * (total_variance)))
     return -2.0 * log(0.5 * (1 - erf_result) + 1e-300)
 
 def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, transmitted_fraction, exponent=2):
