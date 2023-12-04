@@ -459,15 +459,14 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     scaled_sed.luminosities[~agn_mask] *= stellar_mass
     assert sed.info['sfh.sfr'] > 0, sed.info['sfh.sfr']
     assert stellar_mass > 0, stellar_mass
-    scaled_sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info})
-    # convert from erg/s/A at 5100A to erg/s with 5100
+    scaled_sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info and not ('activate' in k or 'agn' in k)})
     # convert from erg/s to W, the luminosity unit of cigale, with 1e7
-    agn_sed.luminosities[agn_mask, :] *= L_AGN / 1e7 / 510
+    agn_sed.luminosities[agn_mask, :] *= L_AGN / 1e7
     scaled_sed.luminosities[agn_mask] = agn_sed.luminosities[agn_mask]
     agn_sed.luminosity = agn_sed.luminosities[agn_mask, :].sum(axis=0)
     # copy over AGN meta data
-    scaled_sed.info.update({k: v * (L_AGN if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
-    agn_sed.info.update({k: v * (L_AGN if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
+    scaled_sed.info.update({k: v * (L_AGN / 1e7 if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
+    agn_sed.info.update({k: v * (L_AGN / 1e7 if 'agn.lum' in k else 1) for k, v in agn_sed.info.items() if 'activate' in k or 'agn' in k})
     scaled_sed.luminosity = scaled_sed.luminosities.sum(0)
 
     # apply the remaining modules (post-caching)
@@ -555,7 +554,7 @@ plot_elements = [
          label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
     dict(keys=_with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
          label="AGN torus", color=[0.90, 0.77, 0.42], marker=None, linestyle='-', linewidth=1.5),
-    dict(keys=_with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_EmLines_LINER']),
+    dict(keys=_with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_BC', 'agn.activate_EmLines_LINER']),
          label="AGN lines", color=[0.90, 0.50, 0.21], marker=None, linestyle='-', linewidth=0.5),
     dict(keys=['dust'], label="Dust", color='darkred', marker=None, linestyle='-', linewidth=0.5),
 ]
@@ -1395,27 +1394,9 @@ class ModelLikelihood(object):
 
         filters_observed = [filters[i] for i in self.wobs]
 
-        # shortcut: compute likelihood with only first filter band
-        if False and self.obs_errors[0] > TOLERANCE and len(self.additional_likelihood_terms) == 0 and not variability_uncertainty:
-            # adopt the best case for other bands: observed flux or zero
-            mask_lim = np.logical_and(self.obs_errors >= -9990., self.obs_errors < TOLERANCE)
-            model_fluxes = np.where(mask_lim, 0, self.obs_fluxes)
-            model_fluxes[0], model_variables = compute_model_fluxes(sed, [filters_observed[0]])
-            norm0, chi2_0, _ = chi2_with_norm(
-                model_fluxes, model_fluxes * np.nan, self.obs_fluxes, self.obs_errors,
-                self.obs_filter_wavelength, redshift, sys_error, NEV=sed.info.get('agn.NEV'),
-                exponent=exponent, transmitted_fraction=transmitted_fraction)
+        model_fluxes, model_variables = compute_model_fluxes(sed, filters_observed)
 
-            logl0 = -0.5 * chi2_0 - norm0
-            if logl0 < getattr(self.sampler, 'Lmin', -np.inf):
-                self.counter_early_reject += 1
-                return logl0
-            
-            model_fluxes[1:], _ = compute_model_fluxes(sed, filters_observed[1:])
-        else:
-            model_fluxes, model_variables = compute_model_fluxes(sed, filters_observed)
-
-        # do costly AGN flux filter computation only if used
+        # do costly AGN flux filter computation only if needed
         if variability_uncertainty:
             for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
                 module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)

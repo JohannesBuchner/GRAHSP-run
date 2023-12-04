@@ -22,7 +22,6 @@ def build_grahsp_sed(
         ('activatelines', dict(AFeII=AFeII, Alines=Alines, linewidth=linewidth)),
         ('activategtorus', dict(Si=Si, fcov=fcov, COOLlam=COOLlam, COOLwidth=COOLwidth, HOTlam=HOTlam, HOTwidth=HOTwidth, HOTfcov=HOTfcov)),
         ('activatepl', dict(plslope=plslope, plbendloc=plbendloc, plbendwidth=plbendwidth, uvslope=uvslope)),
-        ('activatebol', dict()),
     ]
     sed = SED()
     for module_name, params in modules:
@@ -32,14 +31,17 @@ def build_grahsp_sed(
     # select AGN components
     agn_mask = np.array(['activate' in name for name in sed.contribution_names])
     sed.luminosities[~agn_mask] *= stellar_mass
-    sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info})
+    sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info and not ('activate' in k or 'agn' in k)})
     # convert from erg/s/A at 5100A to erg/s with 5100
     # convert from erg/s to W, the luminosity unit of cigale, with 1e7
     sed.luminosities[agn_mask, :] *= L_AGN / 1e7 / 510
+    sed.info.update({k: v * (L_AGN / 1e7 / 510 if 'agn.lum' in k else 1) for k, v in sed.info.items() if 'activate' in k or 'agn' in k})
 
     post_process_modules = [
+        ('activatebol', dict()),
         ('biattenuation', {'E(B-V)':ebv, 'E(B-V)-AGN':ebv_agn, "filters":""}),
         ('galdale2014', dict(alpha=alpha)),
+        ('restframe_parameters', dict(EW="K/393.4777/391/395", D4000="False", beta_calz94="True", IRX="False")),
     ]
 
     for module_name, params in post_process_modules:
@@ -64,7 +66,7 @@ def plot_sed(sed, with_components=False, **kwargs):
         unobsc = {}
         for i, contribution_name in enumerate(sed.contribution_names):
             color = None
-            if 'lines' in contribution_name.lower():
+            if 'lines' in contribution_name.lower() or '_BC' in contribution_name:
                 continue
             if 'nebular' in contribution_name: continue
             if not contribution_name.startswith('attenuation'):
