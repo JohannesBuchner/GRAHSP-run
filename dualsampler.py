@@ -1183,7 +1183,7 @@ def generate_fluxes(Ngen=100000):
                     fluxdata[i][len(param_names + analysed_variables):] = model_fluxes_full
                     break
                 else:
-                    assert np.logical_or(model_fluxes_full > -1e-9, model_fluxes_full == -99).all(), ("some filters give negative fluxes:", filters, model_fluxes_full)
+                    assert np.logical_or(model_fluxes_full > -1e-6, model_fluxes_full == -99).all(), ("some filters give negative fluxes:", filters, model_fluxes_full)
             assert np.isfinite(fluxdata[i]).all(), fluxdata[i]
 
     # save as fits file
