@@ -523,6 +523,8 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
                 xtickmid = np.round(10**(xlo + 0.5 * xspan), sigfig)
                 xtickhi = np.round(10**(xlo + 0.8 * xspan), sigfig)
                 print(param_name, sigfig, xticklo, xtickhi)
+                if xticklo == 0:
+                    xticklo = xtickmid / 100.0
                 plt.xticks(
                     [np.log10(xticklo), np.log10(xtickmid), np.log10(xtickhi)],
                     [fmt % xticklo, fmt % xtickmid, fmt % xtickhi])
