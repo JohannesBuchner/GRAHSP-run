@@ -1,5 +1,5 @@
 """
-GRAHSP (Grasping reliably the AGN host stellar population)
+GRAHSP (Genuine retrieval of the AGN host stellar population)
 
 A broad-band SED fitting tool (X-ray to mid-infrared) for investigating host galaxies of
 active galactic nuclei.
@@ -237,6 +237,7 @@ cache_depth = module_list.index('biattenuation')
 cache_depth_to_clear = cache_depth
 if module_list[cache_depth_to_clear - 1] == 'activatebol':
     cache_depth_to_clear -= 1
+    cache_depth -= 1
 if module_list[cache_depth_to_clear - 1] == 'activatepl':
     cache_depth_to_clear -= 1
 if module_list[cache_depth_to_clear - 1] == 'activategtorus':
@@ -511,7 +512,6 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
         plt.xlabel(('' if i % 2 == 0 else "\n") + param_name)
         xticks, _ = plt.xticks()
         if param_name.startswith('log_') and xhi < 5:
-            print(param_name, xticks)
             if np.allclose(xticks, xticks.astype(int)):
                 plt.xticks(xticks, ['%g' % (10**xi) for xi in xticks])
                 plt.xlabel(('' if i % 2 == 0 else "\n") + param_name[4:])
@@ -522,7 +522,6 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
                 xticklo = np.round(10**(xlo + 0.2 * xspan), sigfig)
                 xtickmid = np.round(10**(xlo + 0.5 * xspan), sigfig)
                 xtickhi = np.round(10**(xlo + 0.8 * xspan), sigfig)
-                print(param_name, sigfig, xticklo, xtickhi)
                 if xticklo == 0:
                     xticklo = xtickmid / 100.0
                 plt.xticks(
