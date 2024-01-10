@@ -538,26 +538,34 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
 def _with_attenuation(keys):
     return keys + ['attenuation.' + key for key in keys]
 
+# Plasma color scheme:
+#plot_colors0 = plt.cm.plasma(np.linspace(0, 1, 10))
+#plot_colors = plot_colors0[0], plot_colors0[2], plot_colors0[4], plot_colors0[-4], plot_colors0[-2], plot_colors0[-1]
+# color brewer color schemes:
+#plot_colors = '#c51b7d', '#e9a3c9', '#fde0ef', '#e6f5d0', '#a1d76a', '#4d9221'
+#plot_colors = '#762a83', '#af8dc3', '#e7d4e8', '#d9f0d3', '#7fbf7b', '#1b7837'
+# my color scheme:
+plot_colors = ['#008fd5', '#fc4f30', '#e5ae38', '#6d904f', '#810f7c', '#8b8b8b']
 
 # groups of SED contributions to include in the fit
 plot_elements = [
     # if you also want the unattenuated emission:
     #dict(keys=['stellar.young', 'stellar.old'],
     #     label="Stellar (unattenuated)", color='orange', marker=None, linestyle=':',),
+    dict(keys=_with_attenuation(['agn.activate_Disk']),
+         label="AGN disk", color=plot_colors[0], marker=None, linestyle='-', linewidth=1.5),
+    dict(keys=_with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
+         label="AGN torus", color=plot_colors[2], marker=None, linestyle='-', linewidth=1.5),
+    dict(keys=_with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_BC', 'agn.activate_EmLines_LINER']),
+         label="AGN lines", color=plot_colors[1], marker=None, linestyle='-', linewidth=0.5, shading=False),
     dict(keys=_with_attenuation(['stellar.young', 'stellar.old']),
-         label="Stellar (attenuated)", color='orange', marker=None, linestyle='-',),
+         label="Stellar (attenuated)", color=plot_colors[-2], marker=None, linestyle='-',),
     dict(keys=_with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
-         label="Nebular emission", color='y', marker=None, linewidth=.5),
+         label="Nebular emission", color=plot_colors[-1], marker=None, linewidth=0.5, shading=False),
     # if you also want the unattenuated disk:
     #dict(keys=['agn.activate_Disk'],
     #     label="AGN disk (unattenuated)", color=[0.90, 0.90, 0.72], marker=None, linestyle=':', linewidth=1.5),
-    dict(keys=_with_attenuation(['agn.activate_Disk']),
-         label="AGN disk", color=[0.90, 0.90, 0.72], marker=None, linestyle='-', linewidth=1.5),
-    dict(keys=_with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
-         label="AGN torus", color=[0.90, 0.77, 0.42], marker=None, linestyle='-', linewidth=1.5),
-    dict(keys=_with_attenuation(['agn.activate_EmLines_BL', 'agn.activate_EmLines_NL', 'agn.activate_FeLines', 'agn.activate_BC', 'agn.activate_EmLines_LINER']),
-         label="AGN lines", color=[0.90, 0.50, 0.21], marker=None, linestyle='-', linewidth=0.5),
-    dict(keys=['dust'], label="Dust", color='darkred', marker=None, linestyle='-', linewidth=0.5),
+    dict(keys=['dust'], label="Dust", color=plot_colors[-3], marker=None, linestyle='-', linewidth=1),
 ]
 
 
@@ -776,9 +784,11 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
             mid, up, lo = np.quantile(bands[sed_type][j].ys, [0.5, 0.5 + 0.341, 0.5 - 0.341], axis=0)
             assert mid.shape == bands[sed_type][j].x.shape
             line_kwargs = dict(plot_element)
+            plot_shading = line_kwargs.pop('shading', True)
             del line_kwargs['keys']
             plt.plot(bands[sed_type][j].x, mid, **line_kwargs)
-            plt.fill_between(bands[sed_type][j].x, lo, up, color=plot_element['color'], alpha=0.1)
+            if plot_shading:
+                plt.fill_between(bands[sed_type][j].x, lo, up, color=plot_element['color'], alpha=0.2)
             seddata += [mid, up, lo]
             del j, plot_element
         k = 'total'
