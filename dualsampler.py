@@ -458,11 +458,14 @@ def scale_sed_components(module_list, parameter_list_here, stellar_mass, L_AGN):
     # scale the AGN and galactic components as needed
     scaled_sed = sed.copy()
     scaled_sed.luminosities[~agn_mask] *= stellar_mass
+    sed.luminosities[~agn_mask] *= stellar_mass
+    sed.luminosities[agn_mask] *= 0.0
     assert sed.info['sfh.sfr'] > 0, sed.info['sfh.sfr']
     assert stellar_mass > 0, stellar_mass
     scaled_sed.info.update({k: v * stellar_mass for k, v in sed.info.items() if k in sed.mass_proportional_info and not ('activate' in k or 'agn' in k)})
     # convert from erg/s to W, the luminosity unit of cigale, with 1e7
     agn_sed.luminosities[agn_mask, :] *= L_AGN / 1e7
+    agn_sed.luminosities[~agn_mask] *= 0.0
     scaled_sed.luminosities[agn_mask] = agn_sed.luminosities[agn_mask]
     agn_sed.luminosity = agn_sed.luminosities[agn_mask, :].sum(axis=0)
     # copy over AGN meta data
@@ -959,7 +962,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
                 band = PredictionBand(np.arange(14000) / 1000.)
                 for sfh in sfhs:
                     y = np.zeros_like(band.x)
-                    y[:len(sfh)] = sfh[::-1]
+                    y[:len(sfh)] = sfh #[::-1]
                     plt.plot(band.x, y / y.max(), color='blue', lw=0.2, alpha=0.5)
                 ax_sfh.set_title('SFH', size=8, loc='left')
                 ax_sfh.yaxis.set_visible(False)
@@ -1350,6 +1353,16 @@ class ModelLikelihood(object):
         self.counter_avoid_recompute_of_same = 0
         self.counter_unphysical_reject = 0
         self.counter_calls = 0
+        self.agn_flux_filters = []
+        self.gal_flux_filters = []
+        for analysed_variable_key, vi, _ in additional_likelihood_terms:
+            if analysed_variable_key == 'AGNflux':
+                self.agn_flux_filters.append(vi)
+            elif analysed_variable_key == 'GALflux':
+                self.gal_flux_filters.append(vi)
+            else:
+                assert analysed_variable_key == 'analysed_variables', 'GRAHSP bug: analysed_variable_key can only be AGNflux, GALflux or analysed_variables.'
+            
 
     def stats(self):
         """Return statistics on computational effort."""
@@ -1416,15 +1429,32 @@ class ModelLikelihood(object):
         else:
             agn_model_fluxes = model_fluxes * np.nan
 
+        assert self.agn_flux_filters == [], 'AGN fluxes as priors is currently not implemented'
+
+        if len(self.gal_flux_filters) > 0:
+            for module_name, module_parameters in zip(module_list[cache_depth:], parameter_list_here[cache_depth:]):
+                module_instance = gbl_warehouse.get_module_cached(module_name, **module_parameters)
+                module_instance.process(gal_sed)
+            gal_model_fluxes = {filter_: gal_sed.compute_fnu(filter_) for filter_ in self.gal_flux_filters}
+        else:
+            gal_model_fluxes = {}
+
         # compute likelihood:
         norm, chi2_, _ = chi2_with_norm(
             model_fluxes, agn_model_fluxes, self.obs_fluxes, self.obs_errors,
             self.obs_filter_wavelength, redshift, sys_error, NEV=sed.info.get('agn.NEV'),
             exponent=exponent, transmitted_fraction=transmitted_fraction)
 
+        analysed_variables_dict = dict(
+            GALflux=gal_model_fluxes,
+            AGNflux=agn_model_fluxes,
+            analysed_variables=model_variables)
+
         logl = -0.5 * chi2_ - norm
-        for analysed_variable_index, likelihood_term in self.additional_likelihood_terms:
-            logl += likelihood_term(model_variables[analysed_variable_index])
+
+        for analysed_variable_key, analysed_variable_index, likelihood_term in self.additional_likelihood_terms:
+            # print('%.1f' % logl, analysed_variable_key, analysed_variable_index, analysed_variables_dict[analysed_variable_key][analysed_variable_index])
+            logl += likelihood_term(analysed_variables_dict[analysed_variable_key][analysed_variable_index])
         self.last_parameters = parameters
         self.last_loglikelihood = logl
         return logl
@@ -1453,6 +1483,14 @@ def analyse_obs_wrapper(args):
     except np.linalg.LinAlgError as e:
         print("skipping '%s', probably not enough data points. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
+
+
+def build_likelihood_term(v, mid, sigma_lo, sigma_hi):
+    def likelihood_term(x):
+        # print("likelihood term for", v, "value", x, mid, sigma_lo, sigma_hi)
+        return -0.5 * np.where(x < mid, (x - mid) / sigma_lo, (x - mid) / sigma_hi)**2
+    likelihood_term.__name__ = 'likelihood_term_%s' % v
+    return likelihood_term
 
 
 def analyse_obs(samplername, obs, plot=True):
@@ -1526,7 +1564,11 @@ def analyse_obs(samplername, obs, plot=True):
     else:
         Finfo = None
     additional_likelihood_terms = []
-    for vi, v in enumerate(analysed_variables):
+    potential_prior_names  = [('analysed_variables', v, vi) for vi, v in enumerate(analysed_variables)]
+    potential_prior_names += [('GALflux', 'GALflux_' + filtername, filtername) for filtername in filters]
+    potential_prior_names += [('AGNflux', 'AGNflux_' + filtername, filtername) for filtername in filters]
+
+    for analysed_variable_key, v, vi in potential_prior_names:
         priorv = 'prior_' + v
         if priorv not in obs.keys():
             continue
@@ -1538,10 +1580,9 @@ def analyse_obs(samplername, obs, plot=True):
             print("NOT including Gaussian constraint on '%s'" % v, (mid, sigma_lo, sigma_hi))
             continue
         print("Including Gaussian constraint on '%s'" % v, (mid, sigma_lo, sigma_hi))
-        def likelihood_term(x):
-            # print("likelihood term for", v, "value", x, mid, sigma_lo, sigma_hi)
-            return -0.5 * np.where(x < mid, (x - mid) / sigma_lo, (x - mid) / sigma_hi)**2
-        additional_likelihood_terms.append((vi, likelihood_term))
+        likelihood_term = build_likelihood_term(v, mid, sigma_lo, sigma_hi)
+        additional_likelihood_terms.append((analysed_variable_key, vi, likelihood_term))
+        del analysed_variable_key, v, vi
 
     prior_transform = make_prior_transform(rv_redshift, Finfo=Finfo, num_redshift_points=num_redshift_points)
 
