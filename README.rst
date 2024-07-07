@@ -5,18 +5,29 @@ Current use policy
 --------------------
 
 GRAHSP is a private code developed with several years of effort.
-There will be a public release in the future. However in the current
-proprietary phase, scientific publications should be obtained that 
-demonstrate the capabilities and benefits and obtain scientific insights.
+There will be a public release in the future. 
 
 That you have received GRAHSP means I trust you to keep the code private
-and respect the policy.
+and respect the policy:
 
-The current usage policy of GRAHSP is that co-authorship needs to be 
-offered to the authors.
+* You will get access to the GRAHSP code (GRAHSP, GRAHSP-run repositories)
+* You will get access to code documentation and example data sets (GRAHSP-example repository)
+* You will get help applying the code and interpreting the results:
+  * Resources include scripts and notebooks in GRAHSP-example, and user issues for questions and answers
+  * If your questions are generic and may help other users, please open an issue (in GRAHSP-run/ for most issues, in GRAHSP-examples/ for the scripts there and for new example data or notebooks, in GRAHSP/ only for model bugs)
+* Scientific publications are encouraged to demonstrate the capabilities and benefits of the code
+and to obtain scientific insights.
 
-SED fitting is a subtle endevour where you can make many 
-mistakes. Preparing the photometry, watch out for 
+You are expected to
+
+* help make improvements to the GRAHSP collaboration, such as:
+  * opening issues pointing out how to improve the documentation for newcomers (for example you do not understand something while reading a file)
+  * help resolve open issues, helping other users
+  * sharing code or data sets with other users, such as a jupyter notebook or data set
+* offer co-authorship to core GRAHSP developers (Johannes, Mara) and anyone else who helps you with the code during the project
+
+SED fitting is a subtle endevour where one can make many 
+mistakes. When preparing the photometry, watch out for 
 * type of magnitude (petrosian, Hall, total/aperture, )
 * that the aperture matches across bands so you look at the same physical region
 * flux conversion (units nanomaggies, mJy, uJy, ...)
@@ -24,8 +35,10 @@ mistakes. Preparing the photometry, watch out for
 * Milky way extinction correction
 * redshifts (photo-z, spec-z, reliability)
 * galaxy and AGN modelling assumptions
+
 Experts co-authors reviewing the final manuscript can improve your work.
 
+You may be interested in RainbowLasso as well: https://github.com/JohannesBuchner/RainbowLasso
 
 Preliminaries
 ---------------
