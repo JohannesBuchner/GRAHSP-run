@@ -223,3 +223,10 @@ This can be enabled by setting the following environment variables:
 
 	# locking if running on multiple machines is problematic on NFS
 	export HDF5_USE_FILE_LOCKING=FALSE
+
+Other scripts
+--------------
+* loofilter.py: Create a modified photometry input file, with new rows that leave out one filter at a time.
+  * Usage: python3 loofilter.py input.fits input-new.fits
+* varyz.py: Create a modified photometry input file, with new rows with slightly altered redshifts.
+  * Usage: python3 varyz.py input.fits input-new.fits
