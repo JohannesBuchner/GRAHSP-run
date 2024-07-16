@@ -527,9 +527,10 @@ def plot_posteriors(filename, prior_samples, param_names, samples):
                 xtickhi = np.round(10**(xlo + 0.8 * xspan), sigfig)
                 if xticklo == 0:
                     xticklo = xtickmid / 100.0
-                plt.xticks(
-                    [np.log10(xticklo), np.log10(xtickmid), np.log10(xtickhi)],
-                    [fmt % xticklo, fmt % xtickmid, fmt % xtickhi])
+                with np.errstate(divide='ignore'):
+                    plt.xticks(
+                        [np.log10(xticklo), np.log10(xtickmid), np.log10(xtickhi)],
+                        [fmt % xticklo, fmt % xtickmid, fmt % xtickhi])
                 plt.xlabel(('' if i % 2 == 0 else "\n") + param_name[4:])
         plt.xlim(xlo, xhi)
 
@@ -628,7 +629,9 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
 
     posteriors_names = analysed_variables + ['chi2']
     logmask = np.array(['lum' in v or 'sfr' in v or 'age' in v for v in analysed_variables])
-    logfunc = lambda x: np.where(logmask, np.log10(x), x)
+    def logfunc(x):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(logmask, np.log10(x), x)
     stellar_mass_column = []
     posteriors = []
     all_mod_fluxes = []
@@ -712,38 +715,61 @@ def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cach
             bands[sed_type]['total'].add((sed.luminosity * sed_multiplier))
 
     posteriors = np.array(posteriors)
-    if all((param in param_names for param in ['log_L_AGN', 'log_stellar_mass', 'log_biattenuation_E(B-V)', 'log_biattenuation_E(B-V)-AGN'])) and \
-       all((param in posteriors_names for param in ['sfh.sfr'])):
-        posterior_summary_text = r'''
+    posterior_summary_text = ''
+    if 'log_stellar_mass' in param_names:
+        posterior_summary_text += r'''
 $m_\star$=
 %.1f
 $_{\pm%.1f}$
-
+''' % (
+            np.log10(10**results['samples'][:,param_names.index('log_stellar_mass')].mean()),
+            results['samples'][:,param_names.index('log_stellar_mass')].std(),)
+    if 'sfh.sfr' in posteriors_names:
+        posterior_summary_text += r'''
 sfr=
 %.1f
 $_{\pm%.1f}$
-
+''' % (
+            np.log10(10**posteriors[:,posteriors_names.index('sfh.sfr')].mean()),
+            posteriors[:,posteriors_names.index('sfh.sfr')].std(),)
+    if 'log_biattenuation_E(B-V)' in param_names:
+        posterior_summary_text += r'''
 E$_\mathrm{B-V}^\mathrm{gal}$=
 %.1f$_{\pm%.1f}$
+''' % (
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)')]).mean(),
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)')]).std(),)
+    elif 'biattenuation.E(B-V)' in param_names:
+        posterior_summary_text += r'''
+E$_\mathrm{B-V}^\mathrm{gal}$=
+%.1f$_{\pm%.1f}$
+''' % (
+            (results['samples'][:,param_names.index('biattenuation.E(B-V)')]).mean(),
+            (results['samples'][:,param_names.index('biattenuation.E(B-V)')]).std(),)
 
+    if 'log_L_AGN' in param_names:
+        posterior_summary_text += r'''
 $l_\mathrm{AGN}$=
 %.1f
 $_{\pm%.1f}$
+''' % (
+            np.log10(10**results['samples'][:,param_names.index('log_L_AGN')]).mean(),
+            results['samples'][:,param_names.index('log_L_AGN')].std(),)
 
+    if 'log_biattenuation_E(B-V)-AGN' in param_names:
+        posterior_summary_text += r'''
 E$_\mathrm{B-V}^\mathrm{AGN}$=
 %.1f$_{\pm%.1f}$''' % (
-            np.log10(10**results['samples'][:,param_names.index('log_stellar_mass')].mean()),
-            results['samples'][:,param_names.index('log_stellar_mass')].std(),
-            np.log10(10**posteriors[:,posteriors_names.index('sfh.sfr')].mean()),
-            posteriors[:,posteriors_names.index('sfh.sfr')].std(),
-            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)')]).mean(),
-            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)')]).std(),
-            np.log10(10**results['samples'][:,param_names.index('log_L_AGN')]).mean(),
-            results['samples'][:,param_names.index('log_L_AGN')].std(),
             (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)-AGN')]).mean(),
-            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)-AGN')]).std(),
-        )
-    else:
+            (10**results['samples'][:,param_names.index('log_biattenuation_E(B-V)-AGN')]).std(),)
+    elif 'biattenuation.E(B-V)-AGN' in param_names:
+        posterior_summary_text += r'''
+E$_\mathrm{B-V}^\mathrm{AGN}$=
+%.1f$_{\pm%.1f}$''' % (
+            (results['samples'][:,param_names.index('biattenuation.E(B-V)-AGN')]).mean(),
+            (results['samples'][:,param_names.index('biattenuation.E(B-V)-AGN')]).std(),)
+    
+    if posterior_summary_text == '':
         print(posteriors_names)
         posterior_summary_text = 'N/A'
 
@@ -882,8 +908,9 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
         ax3.axis('off')
         with Database() as base:
             legend_names_seen = set()
-            for filtername, used in zip([filters[i] for i in wobs], np.logical_or(mask_ok, np.logical_or(mask_noerr, mask_uplim))):
-                if not used: continue
+            #for filtername, used in zip([filters[i] for i in wobs], np.logical_or(mask_ok, np.logical_or(mask_noerr, mask_uplim))):
+                #if not used: continue
+            for filtername in sorted(filters, key=lambda filtername: base.get_filter(filtername.rstrip('_')).effective_wavelength, reverse=True):
                 f = base.get_filter(filtername.rstrip('_'))
                 filtergroup_name = get_filtergroup_name(filtername)
                 color = filtergroups_colors.get(filtergroup_name)
@@ -931,7 +958,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
             # set right hand ticks in mag AB with round numbers
             ABmax = -2.5 * np.log10(ax1.get_ylim()[0] / 3631000)
             ABmin = -2.5 * np.log10(ax1.get_ylim()[1] / 3631000)
-            ytick_ABs = np.arange(int(np.ceil(min(35,ABmin))), int(np.floor(min(10,ABmax))) + 1)
+            ytick_ABs = np.arange(int(np.ceil(min(35,ABmin))), int(np.floor(max(10,ABmax))) + 1)
             ytick_fluxes_mJy = 3631000 * 10**(ytick_ABs / -2.5)
             ax_r = ax1.secondary_yaxis('right')
             ax_r.set_ylim(ax1.get_ylim())
@@ -949,7 +976,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
             ax2.set_ylabel("(Obs-Mod)/Obs", size=8)
         ax1.legend(fontsize=6, loc='best', fancybox=True, framealpha=0.5)
         figure.suptitle(
-            "%s at z=%.3f, $\chi^2_{/n}$=%.1f/%d Z=%.1f" %
+            "%s at z=%.3f, $\\chi^2_{/n}$=%.1f/%d Z=%.1f" %
             (obs['id'], obs['redshift'], chi2_best, len(obs_fluxes), Z),
             y=0.95)
         if sed_type == "lum":
@@ -958,7 +985,6 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
                     va='bottom', fontfamily="serif", fontvariant='small-caps')
             if os.environ.get("PLOT_SFH", "0") == "1":
                 ax_sfh = figure.add_axes([0.915, 0.11, 0.08, 0.1])
-                print(sfhs[0].shape, sfhs[0])
                 band = PredictionBand(np.arange(14000) / 1000.)
                 for sfh in sfhs:
                     y = np.zeros_like(band.x)
@@ -989,7 +1015,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
         )
 
 
-def make_prior_transform(rv_redshift, Finfo=None, num_redshift_points=40):
+def make_prior_transform(rv_redshift, Finfo=None, Linfo=None, num_redshift_points=40):
     """Create the prior transform given prior information about the flux or redshift.
 
     Parameters
@@ -1025,6 +1051,17 @@ def make_prior_transform(rv_redshift, Finfo=None, num_redshift_points=40):
             # convert from erg/s/cm^2 to erg/s
             logL = logF + np.log10(4 * np.pi) + 2 * np.log10((cosmology.luminosity_distance(redshift) / units.cm).to(1))
             return logL
+    # consider prior on 5100A luminosity
+    elif Linfo is not None:
+        LAGN, LAGN_errlo, LAGN_errhi = Linfo
+        # Sides of the asymmetric gaussian prior on log(flux)
+        rv_L_lo = NormalDist(LAGN, LAGN_errlo)
+        rv_L_hi = NormalDist(LAGN, LAGN_errhi)
+
+        def L_prior_transform(u, redshift):
+            # pick the appropriate side
+            rv = rv_L_lo if u < 0.5 else rv_L_hi
+            return rv.ppf(u)
     else:
         def L_prior_transform(u, z):
             # AGN luminosity from 10^38 to 10^50
@@ -1147,7 +1184,7 @@ def plot_model():
                         first_legend = plt.legend(title='Components', framealpha=0.5, loc='upper left')
                 plt.gca().add_artist(first_legend)
 
-                plt.xlabel("Wavelength [$\mu$m]")
+                plt.xlabel("Wavelength [$\\mu$m]")
                 plt.ylabel("Luminosity [W]")
                 plt.xscale('log')
                 plt.yscale('log')
@@ -1468,9 +1505,9 @@ def analyse_obs_wrapper(args):
     This allows continuing the run with the next source,
     and later reprocessing the entire sample.
     """
-    samplername, obs, plot = args
+    i, N, samplername, obs, plot = args
     try:
-        return analyse_obs(samplername, obs, plot=plot)
+        return analyse_obs(i, N, samplername, obs, plot=plot)
     except OSError as e:
         print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
@@ -1493,11 +1530,15 @@ def build_likelihood_term(v, mid, sigma_lo, sigma_hi):
     return likelihood_term
 
 
-def analyse_obs(samplername, obs, plot=True):
+def analyse_obs(i, N, samplername, obs, plot=True):
     """Source fitting.
 
     Parameters
     ----------
+    i: int
+        source index out of N being analysed. Not used except for print.
+    N: int
+        total number of sources being analysed. Not used except for print.
     obs: dict
         Observation table row (id, redshift, etc)
     plot: bool
@@ -1553,7 +1594,8 @@ def analyse_obs(samplername, obs, plot=True):
     print()
     print("="*80)
     print()
-    print("Source:", obs['id'], "Redshift:", rv_redshift.mean(), rv_redshift.std())
+    print("[%d/%d] Source:" % (i+1, N), obs['id'], "Redshift:", rv_redshift.mean(), rv_redshift.std())
+    del i, N
     print()
     if 'FAGN' in obs.keys() and 'FAGN_errlo' in obs.keys() and 'FAGN_errhi' in obs.keys():
         Finfo = (obs['FAGN'], obs['FAGN_errlo'], obs['FAGN_errhi'])
@@ -1563,6 +1605,11 @@ def analyse_obs(samplername, obs, plot=True):
         print("Including Gaussian AGN log-flux constraint:", Finfo)
     else:
         Finfo = None
+    if 'LAGN' in obs.keys() and 'LAGN_errlo' in obs.keys() and 'LAGN_errhi' in obs.keys():
+        Linfo = (obs['LAGN'], obs['LAGN_errlo'], obs['LAGN_errhi'])
+        print("Including Gaussian AGN log-L constraint:", Linfo)
+    else:
+        Linfo = None
     additional_likelihood_terms = []
     potential_prior_names  = [('analysed_variables', v, vi) for vi, v in enumerate(analysed_variables)]
     potential_prior_names += [('GALflux', 'GALflux_' + filtername, filtername) for filtername in filters]
@@ -1584,7 +1631,7 @@ def analyse_obs(samplername, obs, plot=True):
         additional_likelihood_terms.append((analysed_variable_key, vi, likelihood_term))
         del analysed_variable_key, v, vi
 
-    prior_transform = make_prior_transform(rv_redshift, Finfo=Finfo, num_redshift_points=num_redshift_points)
+    prior_transform = make_prior_transform(rv_redshift, Finfo=Finfo, Linfo=Linfo, num_redshift_points=num_redshift_points)
 
     prior_samples = np.asarray([prior_transform(u) for u in np.random.uniform(size=(10000, len(active_param_names)))])
     assert np.isfinite(prior_samples).all()
@@ -1688,7 +1735,7 @@ def main():
         # analyse observations in parallel
         if n_cores == 1:
             # to preserve traceback for debugging run in here
-            allresults = (analyse_obs_wrapper((args.sampler, obs_table_here[i], plot)) for i in indices)
+            allresults = (analyse_obs_wrapper((i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
         elif os.environ.get('MP_METHOD', 'forkserver') == 'joblib':
             try:
                 parallel = joblib.Parallel(n_jobs=n_cores, return_generator=True)  # joblib>1.2 will support this
@@ -1696,7 +1743,7 @@ def main():
                 parallel = joblib.Parallel(n_jobs=n_cores) # fall-back for joblib <= 1.2
             allresults = parallel(
                 joblib.delayed(analyse_obs_wrapper)(
-                (args.sampler, obs_table_here[i], plot)) for i in indices)
+                (i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
         else:
             mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
             with mp_ctx.Pool(n_cores, maxtasksperchild=3) as pool:

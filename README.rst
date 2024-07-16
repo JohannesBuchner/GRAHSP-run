@@ -117,8 +117,8 @@ Verify that the installation was successful:
 
 In the GRAHSP-examples/DR16QWX folder, run::
 
-	$ python3 ../GRAHSP-run/dualsampler.py --help
-	$ python3 ../GRAHSP-run/dualsampler.py list-filters
+	$ python3 ../../GRAHSP-run/dualsampler.py --help
+	$ python3 ../../GRAHSP-run/dualsampler.py list-filters
 
 
 Plotting the model
@@ -143,7 +143,7 @@ Running GRAHSP
 
 The fitting is performed with **dualsampler.py**. To understand the interface, run::
 
-	$ python3 ../sampler/dualsampler.py --help
+	$ python3 ../../GRAHSP-run/dualsampler.py --help
 
 * The model setup is described with a pcigale.ini file. This is virtually identical to CIGALE.
 * The data is described with a data file (pointed to in the pcigale.ini). This is virtually identical to CIGALE.
@@ -152,7 +152,7 @@ The fitting is performed with **dualsampler.py**. To understand the interface, r
 
 In a directory with pcigale.ini file, the following command
 
-	$ python3 ../sampler/dualsampler.py analyse --cores=2 --plot
+	$ python3 ../../GRAHSP-run/dualsampler.py analyse --cores=2 --plot
 
 does:
 
@@ -179,7 +179,7 @@ To obtain a file which contains also the input file columns, the following may b
 There is also a post-processing script which does the same, and makes
 a diagnostic plot of the fit residuals::
 
-	$ python3 ../sampler/postprocess.py
+	$ python3 ../../GRAHSP-run/postprocess.py
 
 
 Environment flags
@@ -226,6 +226,8 @@ This can be enabled by setting the following environment variables:
 
 Other scripts
 --------------
+
+Here you can also find:
 * loofilter.py: Create a modified photometry input file, with new rows that leave out one filter at a time.
   * Usage: python3 loofilter.py input.fits input-new.fits
 * varyz.py: Create a modified photometry input file, with new rows with slightly altered redshifts.
