@@ -158,6 +158,8 @@ Environment variables (see README):
    PLOT_FILTERNAMES: if 1, show name of filters with filter curves
    PLOT_KEYSTATS: if 1, show key stats on the right of plot
    PLOT_SFH: if 1, plot star formation history
+   PLOT_CORNER: if 1, create corner plots to investigate parameter degeneracies.
+   PLOT_TRACE: if 1, create trace plots
    OMP_NUM_THREAD
    HDF5_USE_FILE_LOCKING
 
@@ -234,6 +236,7 @@ n_cores = args.cores
 parameter_list = config.configuration['creation_modules_params']
 # limit caching to the first few modules, rest is on-the-fly
 cache_depth = module_list.index('biattenuation')
+#cache_depth = module_list.index('triattenuation')
 cache_depth_to_clear = cache_depth
 if module_list[cache_depth_to_clear - 1] == 'activatebol':
     cache_depth_to_clear -= 1
@@ -351,6 +354,7 @@ param_names.append("log_stellar_mass")
 param_names.append("log_L_AGN")
 param_names.append("redshift")
 param_names.append("systematics")
+print('%d free model parameters' % len(param_names))
 rv_systematics = ExponentialDist(scale=systematics_width)
 
 print("Statistics")
@@ -554,8 +558,6 @@ plot_colors = ['#008fd5', '#fc4f30', '#e5ae38', '#6d904f', '#810f7c', '#8b8b8b']
 # groups of SED contributions to include in the fit
 plot_elements = [
     # if you also want the unattenuated emission:
-    #dict(keys=['stellar.young', 'stellar.old'],
-    #     label="Stellar (unattenuated)", color='orange', marker=None, linestyle=':',),
     dict(keys=_with_attenuation(['agn.activate_Disk']),
          label="AGN disk", color=plot_colors[0], marker=None, linestyle='-', linewidth=1.5),
     dict(keys=_with_attenuation(['agn.activate_Torus', 'agn.activate_TorusSi']),
@@ -566,12 +568,16 @@ plot_elements = [
          label="Stellar (attenuated)", color=plot_colors[-2], marker=None, linestyle='-',),
     dict(keys=_with_attenuation(['nebular.lines_young', 'nebular.lines_old', 'nebular.continuum_young', 'nebular.continuum_old']),
          label="Nebular emission", color=plot_colors[-1], marker=None, linewidth=0.5, shading=False),
-    # if you also want the unattenuated disk:
-    #dict(keys=['agn.activate_Disk'],
-    #     label="AGN disk (unattenuated)", color=[0.90, 0.90, 0.72], marker=None, linestyle=':', linewidth=1.5),
     dict(keys=['dust'], label="Dust", color=plot_colors[-3], marker=None, linestyle='-', linewidth=1),
 ]
-
+if os.environ.get('WITH_UNATTENUATED_COMPONENTS', '0') == '1':
+    plot_elements += [
+        dict(keys=['stellar.young', 'stellar.old'],
+             label="Stellar (unattenuated)", color='orange', marker=None, linestyle=':',),
+        # if you also want the unattenuated disk:
+        dict(keys=['agn.activate_Disk'],
+             label="AGN disk (unattenuated)", color=plot_colors[-2], marker=None, linestyle=':', linewidth=1.5),
+    ]
 
 def plot_results(sampler, prior_samples, obs, obs_fluxes, obs_errors, wobs, cache_filters, replot):
     """Make all the plots."""
@@ -817,7 +823,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
             del line_kwargs['keys']
             plt.plot(bands[sed_type][j].x, mid, **line_kwargs)
             if plot_shading:
-                plt.fill_between(bands[sed_type][j].x, lo, up, color=plot_element['color'], alpha=0.2)
+                plt.fill_between(bands[sed_type][j].x, lo, up, facecolor=plot_element['color'], edgecolor='none', alpha=0.2)
             seddata += [mid, up, lo]
             del j, plot_element
         k = 'total'
@@ -1167,6 +1173,7 @@ def plot_model():
                         line_kwargs = dict(plot_element)
                         del line_kwargs['keys']
                         line_kwargs['alpha'] = alpha
+                        line_kwargs.pop('shading', None)
                         plt.plot(wavelength_spec[mask], pred[mask], **line_kwargs)
                         outputs.append(pred)
                         output_labels.append(plot_element['label'])
@@ -1243,7 +1250,7 @@ def generate_fluxes(Ngen=100000):
 
 def chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
     erf_result = scipy.special.erf((obs_fluxes-model_fluxes) / (np.sqrt(2) * (total_variance)))
-    return -2.0 * log(0.5 * (1 - erf_result) + 1e-300)
+    return -2.0 * log(0.5 * (1 + erf_result) + 1e-300)
 
 def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_filter_wavelength, redshift, sys_error, NEV, transmitted_fraction, exponent=2):
     """Likelihood considering all variance contributions.
@@ -1335,7 +1342,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
 
     if with_Ly_break_uncertainty:
         # ignore measurements falling below the Lyman break, as the IGM model is simplistic
-        Ly_break_uncertainty = np.where(obs_filter_wavelength / (1 + redshift) < 100, 10000, 0)
+        Ly_break_uncertainty = np.where(obs_filter_wavelength / (1 + redshift) < 150, 10000, 0)
         sys_variance += (Ly_break_uncertainty * model_fluxes)**2
     del obs_filter_wavelength
     del redshift
@@ -1345,7 +1352,7 @@ def chi2_with_norm(model_fluxes, agn_model_fluxes, obs_fluxes, obs_errors, obs_f
 
     # compute chi^2 and the Gaussian likelihood normalisation
     chi2_ = np.sum(
-        ((obs_fluxes[mask_data]-model_fluxes[mask_data])**2 / total_variance[mask_data])**(exponent/2.0))
+        ((obs_fluxes[mask_data] - model_fluxes[mask_data])**2 / total_variance[mask_data])**(exponent/2.0))
     norm = 0.5 * np.log(2 * np.pi * total_variance**(exponent/2.0)).sum()
 
     if mask_lim.any():
@@ -1518,8 +1525,8 @@ def analyse_obs_wrapper(args):
         print("skipping '%s', probably analysed on another machine. error was: '%s'" % (obs['id'], e))
         return obs['id'], None, None
     except np.linalg.LinAlgError as e:
-        print("skipping '%s', probably not enough data points. error was: '%s'" % (obs['id'], e))
-        return obs['id'], None, None
+        # print("skipping '%s', too few live points. error was: '%s'" % (obs['id'], e))
+        raise Exception("Too few live points, caused a LinAlgError. use --num-live-points.") from e
 
 
 def build_likelihood_term(v, mid, sigma_lo, sigma_hi):
