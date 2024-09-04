@@ -121,28 +121,18 @@ class NormalDist(object):
     def std(self):
         return self.std
 
-class PhotoZ_Dist(object):
-    """Photometric redshift distribution.
-    The photometric catalogue must contain the 'ZGRID' and 'PZ' columns,
-    respectively, the redshift grid and the photometric redshift probability distribution.
-    It must also contain a 'flag_zphot' column. 
-    If True for an object, the zPDF will be used for its SED fit, otherwise, the other methods will be used.
-    """
+class PDFDist(object):
+    """Probability distribution function."""
     
     # provides compatibility with scipy.stats distributions
-    def __init__(self, obs):
-        self.obs = obs
-        
-        self.zgrid = np.linspace(self.obs['ZGRID'][0], self.obs['ZGRID'][-1], len(self.obs['ZGRID'])*10)
-        self.PZ = interp1d(self.obs['ZGRID'], self.obs['PZ'])(self.zgrid)
-        self.CDF = np.cumsum(self.PZ) / np.sum(self.PZ)
-        self.ppf =  interp1d(self.CDF, self.zgrid, bounds_error=False, fill_value=(0, 1))
+    def __init__(self, grid, pdf_values):
+        self.grid = np.linspace(grid[0], grid[-1], len(grid)*10)
+        self.PDF_values = interp1d(grid, pdf_values)(self.grid)
+        self.CDF = np.cumsum(self.PDF_values) / np.sum(self.PDF_values)
+        self.ppf = interp1d(self.CDF, self.grid, bounds_error=False, fill_value=(0, 1))
         self.mean_val = self.ppf(0.5)
         self.std_val = np.sqrt((self.ppf(0.1585) - self.mean_val)**2 
                                + (self.ppf(0.8415) - self.mean_val)**2)
-
-    def ppf(self, u):
-        return self.ppf()
 
     def mean(self):
         return self.mean_val
@@ -1595,7 +1585,8 @@ def analyse_obs(i, N, samplername, obs, plot=True):
     num_redshift_points = 40
 
     if samplername.startswith('nested') and ('flag_zphot' in obs.colnames and obs['flag_zphot']):
-        rv_redshift = PhotoZ_Dist(obs)
+        assert 'ZGRID' in obs.colnames and 'PZ' in obs.colnames
+        rv_redshift = PDFDist(obs['ZGRID'], obs['PZ'])
         active_param_names = param_names
         derived_param_names = []
     elif samplername.startswith('nested') and ('redshift_err' not in obs.colnames or 0<=obs['redshift_err']<=0.001):
