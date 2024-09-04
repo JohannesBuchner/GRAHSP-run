@@ -1771,6 +1771,7 @@ def main():
             # to preserve traceback for debugging run in here
             allresults = (analyse_obs_wrapper((i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
         elif os.environ.get('MP_METHOD', 'forkserver') == 'joblib':
+            print("Parallelisation with MP_METHOD='joblib' (if the process is stuck, change MP_METHOD)")
             try:
                 parallel = joblib.Parallel(n_jobs=n_cores, return_generator=True)  # joblib>1.2 will support this
             except TypeError:
@@ -1779,6 +1780,7 @@ def main():
                 joblib.delayed(analyse_obs_wrapper)(
                 (i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
         else:
+            print("Parallelisation with MP_METHOD='forkserver' (if the process is stuck, change MP_METHOD)")
             mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
             with mp_ctx.Pool(n_cores, maxtasksperchild=3) as pool:
                 # farm out to process pool
