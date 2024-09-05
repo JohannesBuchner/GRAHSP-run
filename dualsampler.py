@@ -196,9 +196,11 @@ parser.add_argument(
 parser.add_argument(
     '--cores', type=int, default=1,
     help='number of processes to parallelise for (see joblib.Parallel)')
+
 parser.add_argument(
     '--num-posterior-samples', type=int, default=50,
     help='number of posterior samples to analyse in post-processing')
+
 parser.add_argument(
     '--num-live-points', type=int, default=50,
     help='number of live points for nested sampling')
@@ -206,12 +208,7 @@ parser.add_argument(
 parser.add_argument(
     '--plot', action='store_true',
     help='also make plots of the SED and parameter constraints')
-parser.add_argument(
-    '--mass-max', type=float, default=15,
-    help='Maximum stellar mass.')
-parser.add_argument(
-    '--sfr-max', type=float, default=100000,
-    help='Maximum SFR, averaged over the last 100Myrs, in Msun/yr.')
+
 parser.add_argument(
     '--randomize', action='store_true',
     help='Randomize order in which to analyse observations.')
