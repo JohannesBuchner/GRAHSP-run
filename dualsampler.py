@@ -241,6 +241,7 @@ if cosmo_string != 'concordance':
 cosmology = pcigale.creation_modules.redshifting.cosmology
 
 data_file = config.configuration['data_file']
+assert os.path.exists(data_file), f'The file {data_file} does not exist.'
 column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
 
