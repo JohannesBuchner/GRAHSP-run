@@ -274,6 +274,8 @@ analysed_variables = analysis_module_params["analysed_variables"]
 n_variables = len(analysed_variables)
 lim_flag = analysis_module_params["lim_flag"].lower() == "true"
 mock_flag = analysis_module_params["mock_flag"].lower() == "true"
+mass_max = analysis_module_params['mass_max']
+sfr_max = analysis_module_params['sfr_max']
 
 # get statistics configuration
 exponent = int(statistics_config.get('exponent', '2'))
@@ -328,7 +330,7 @@ latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  Galaxy components: & & \\' + "\n")
 latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^5$ and $10^{\mathtt{mass\_max}} M_\odot$ \\' + "\n")
-latex_table.write(r'  \texttt{mass\_max} & & %d \\' % (args.mass_max) + "\n")
+latex_table.write(r'  \texttt{mass\_max} & & %d \\' % (mass_max) + "\n")
 param_names = []
 is_log_param = []
 print()
@@ -1099,7 +1101,7 @@ def make_prior_transform(rv_redshift, Finfo=None, Linfo=None, num_redshift_point
                     i += 1
 
         # stellar mass from 10^5 to 10^15
-        params[i] = cube[i] * (args.mass_max - 5) + 5
+        params[i] = cube[i] * (mass_max - 5) + 5
 
         # redshift.
         # Approximate redshift with points on the CDF
@@ -1456,11 +1458,11 @@ class ModelLikelihood(object):
         agn_sed.cache_filters = self.cache_filters
 
         sfr = sed.info['sfh.sfr100Myrs']
-        if sed.info['sfh.age'] > sed.info['universe.age'] or not 0 <= sfr <= args.sfr_max:
+        if sed.info['sfh.age'] > sed.info['universe.age'] or not 0 <= sfr <= sfr_max:
             # excluded by exceeding age of Universe
             # assign lower number for those further away from the constraints
             logl = -1e20 * (np.log10(stellar_mass) + abs(sfr) + max(0, sed.info['sfh.age'] - sed.info['universe.age']))
-            #print("violation", (0, sfr, args.sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
+            #print("violation", (0, sfr, sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
             self.last_parameters = parameters
             self.last_loglikelihood = logl
             self.counter_unphysical_reject += 1
@@ -1681,8 +1683,8 @@ def analyse_obs(i, N, samplername, obs, plot=True):
         'A' if with_attenuation_model_uncertainty else '',
         -int(np.log10(systematics_width)),
     )
-    if args.mass_max != 15:
-        outdir += "_maxgal%d" % args.mass_max
+    if mass_max != 15:
+        outdir += "_maxgal%d" % mass_max
 
     replot = (os.environ.get('REPLOT', '0') == '1') or not os.path.exists(outdir + '/analysis_results.txt')
     results = None
