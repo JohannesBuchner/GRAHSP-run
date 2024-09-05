@@ -243,7 +243,7 @@ cosmology = pcigale.creation_modules.redshifting.cosmology
 data_file = config.configuration['data_file']
 column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
-statistics_config = config.config['statistics']
+
 # receive number of cores from command line
 # configuration describes the model, command line describes how to run
 n_cores = args.cores
@@ -271,10 +271,19 @@ analysed_variables = analysis_module_params["analysed_variables"]
 n_variables = len(analysed_variables)
 lim_flag = analysis_module_params["lim_flag"].lower() == "true"
 mock_flag = analysis_module_params["mock_flag"].lower() == "true"
+
+
+# get scaling parameters limits
+scaling_limits = config.config['scaling_limits']
+mass_min = analysis_module_params['mass_min']
 mass_max = analysis_module_params['mass_max']
-sfr_max = analysis_module_params['sfr_max']
+sfr_min = scaling_limits['sfr_min']
+sfr_max = scaling_limits['sfr_max']
+L_min = scaling_limits['L_min']
+L_max = scaling_limits['L_max']
 
 # get statistics configuration
+statistics_config = config.config['statistics']
 exponent = int(statistics_config.get('exponent', '2'))
 with_attenuation_model_uncertainty = statistics_config.get('attenuation_model_uncertainty', 'false').lower() == 'true'
 with_Ly_break_uncertainty = statistics_config.get('Ly_break_uncertainty', 'false').lower() == 'true'
@@ -326,8 +335,9 @@ latex_table.write(r'  Parameter & Description & Values \\' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  Galaxy components: & & \\' + "\n")
-latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^5$ and $10^{\mathtt{mass\_max}} M_\odot$ \\' + "\n")
+latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^{\mathtt{mass\_min}}$ and $10^{\mathtt{mass\_max}} M_\odot$ \\' + "\n")
 latex_table.write(r'  \texttt{mass\_max} & & %d \\' % (mass_max) + "\n")
+latex_table.write(r'  \texttt{mass\_min} & & %d \\' % (mass_min) + "\n")
 param_names = []
 is_log_param = []
 print()
@@ -1082,9 +1092,9 @@ def make_prior_transform(rv_redshift, Finfo=None, Linfo=None, num_redshift_point
             return rv.ppf(u)
     else:
         def L_prior_transform(u, z):
-            # AGN luminosity from 10^38 to 10^50
+            # AGN luminosity from 10^L_min to 10^L_max
             del z
-            return u * 12 + 38
+            return u * (L_max - L_min) + L_min
 
     def prior_transform(cube):
         params = np.empty(len(cube) + (1 if redshift_fixed else 0)) + np.nan
@@ -1098,7 +1108,7 @@ def make_prior_transform(rv_redshift, Finfo=None, Linfo=None, num_redshift_point
                     i += 1
 
         # stellar mass from 10^5 to 10^15
-        params[i] = cube[i] * (mass_max - 5) + 5
+        params[i] = cube[i] * (mass_max - mass_min) + mass_min
 
         # redshift.
         # Approximate redshift with points on the CDF
@@ -1455,11 +1465,11 @@ class ModelLikelihood(object):
         agn_sed.cache_filters = self.cache_filters
 
         sfr = sed.info['sfh.sfr100Myrs']
-        if sed.info['sfh.age'] > sed.info['universe.age'] or not 0 <= sfr <= sfr_max:
+        if sed.info['sfh.age'] > sed.info['universe.age'] or not sfr_min <= sfr <= sfr_max:
             # excluded by exceeding age of Universe
             # assign lower number for those further away from the constraints
             logl = -1e20 * (np.log10(stellar_mass) + abs(sfr) + max(0, sed.info['sfh.age'] - sed.info['universe.age']))
-            #print("violation", (0, sfr, sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
+            #print("violation", (sfr_min, sfr, sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
             self.last_parameters = parameters
             self.last_loglikelihood = logl
             self.counter_unphysical_reject += 1
