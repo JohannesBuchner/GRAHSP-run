@@ -275,12 +275,12 @@ mock_flag = analysis_module_params["mock_flag"].lower() == "true"
 
 # get scaling parameters limits
 scaling_limits = config.config['scaling_limits']
-mass_min = scaling_limits['mass_min']
-mass_max = scaling_limits['mass_max']
-sfr_min = scaling_limits['sfr_min']
-sfr_max = scaling_limits['sfr_max']
-L_min = scaling_limits['L_min']
-L_max = scaling_limits['L_max']
+mass_min = float(scaling_limits['mass_min'])
+mass_max = float(scaling_limits['mass_max'])
+sfr_min = float(scaling_limits['sfr_min'])
+sfr_max = float(scaling_limits['sfr_max'])
+L_min = float(scaling_limits['L_min'])
+L_max = float(scaling_limits['L_max'])
 
 # get statistics configuration
 statistics_config = config.config['statistics']
