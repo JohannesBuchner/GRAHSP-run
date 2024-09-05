@@ -1773,7 +1773,7 @@ def main():
                 (i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
         else:
             print(f"Parallelisation with MP_METHOD={MP_method} (if the process is stuck, change MP_METHOD)")
-            mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
+            mp_ctx = multiprocessing.get_context(MP_method)
             with mp_ctx.Pool(n_cores, maxtasksperchild=3) as pool:
                 # farm out to process pool
                 allresults = pool.imap_unordered(
