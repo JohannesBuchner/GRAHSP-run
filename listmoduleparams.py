@@ -1,4 +1,7 @@
-#import pcigale.creation_modules
+#!/usr/bin/env python3
+"""
+This script gives an example config for each known and recommended module.
+"""
 import importlib
 
 modules = 'sfhdelayed bc03 m2005 sfhdelayed nebular dustatt_calzleit dustatt_powerlaw galdale2014 activate activatelines activategtorus activatepl activatebol biattenuation galdale2014 redshifting'.split()
