@@ -335,9 +335,7 @@ latex_table.write(r'  Parameter & Description & Values \\' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  Galaxy components: & & \\' + "\n")
-latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^{\mathtt{mass\_min}}$ and $10^{\mathtt{mass\_max}} M_\odot$ \\' + "\n")
-latex_table.write(r'  \texttt{mass\_max} & & %d \\' % (mass_max) + "\n")
-latex_table.write(r'  \texttt{mass\_min} & & %d \\' % (mass_min) + "\n")
+latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^{%d}$ and $10^{%d} M_\odot$ \\' % (mass_min, mass_max) + "\n")
 param_names = []
 is_log_param = []
 print()
