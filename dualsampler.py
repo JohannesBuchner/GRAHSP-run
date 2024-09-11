@@ -121,6 +121,25 @@ class NormalDist(object):
     def std(self):
         return self.std
 
+class PDFDist(object):
+    """Probability distribution function."""
+    
+    # provides compatibility with scipy.stats distributions
+    def __init__(self, grid, pdf_values):
+        self.grid = np.linspace(grid[0], grid[-1], len(grid)*10)
+        self.PDF_values = interp1d(grid, pdf_values)(self.grid)
+        self.CDF = np.cumsum(self.PDF_values) / np.sum(self.PDF_values)
+        self.ppf = interp1d(self.CDF, self.grid, bounds_error=False, fill_value=(0, 1))
+        self.mean_val = self.ppf(0.5)
+        self.std_val = np.sqrt((self.ppf(0.1585) - self.mean_val)**2 
+                               + (self.ppf(0.8415) - self.mean_val)**2)
+
+    def mean(self):
+        return self.mean_val
+
+    def std(self):
+        return self.std_val 
+
 
 class FastAttenuation(object):
     """Context within which the attenuation law reduces computation.
@@ -179,9 +198,11 @@ parser.add_argument(
 parser.add_argument(
     '--cores', type=int, default=1,
     help='number of processes to parallelise for (see joblib.Parallel)')
+
 parser.add_argument(
     '--num-posterior-samples', type=int, default=50,
     help='number of posterior samples to analyse in post-processing')
+
 parser.add_argument(
     '--num-live-points', type=int, default=50,
     help='number of live points for nested sampling')
@@ -189,12 +210,7 @@ parser.add_argument(
 parser.add_argument(
     '--plot', action='store_true',
     help='also make plots of the SED and parameter constraints')
-parser.add_argument(
-    '--mass-max', type=float, default=15,
-    help='Maximum stellar mass.')
-parser.add_argument(
-    '--sfr-max', type=float, default=100000,
-    help='Maximum SFR, averaged over the last 100Myrs, in Msun/yr.')
+
 parser.add_argument(
     '--randomize', action='store_true',
     help='Randomize order in which to analyse observations.')
@@ -227,9 +243,10 @@ if cosmo_string != 'concordance':
 cosmology = pcigale.creation_modules.redshifting.cosmology
 
 data_file = config.configuration['data_file']
+assert os.path.exists(data_file), f'The file {data_file} does not exist.'
 column_list = config.configuration['column_list']
 module_list = config.configuration['creation_modules']
-statistics_config = config.config['statistics']
+
 # receive number of cores from command line
 # configuration describes the model, command line describes how to run
 n_cores = args.cores
@@ -259,7 +276,18 @@ n_variables = len(analysed_variables)
 lim_flag = analysis_module_params["lim_flag"].lower() == "true"
 mock_flag = analysis_module_params["mock_flag"].lower() == "true"
 
+
+# get scaling parameters limits
+scaling_limits = config.config['scaling_limits']
+mass_min = float(scaling_limits['mass_min'])
+mass_max = float(scaling_limits['mass_max'])
+sfr_min = float(scaling_limits['sfr_min'])
+sfr_max = float(scaling_limits['sfr_max'])
+L_min = float(scaling_limits['L_min'])
+L_max = float(scaling_limits['L_max'])
+
 # get statistics configuration
+statistics_config = config.config['statistics']
 exponent = int(statistics_config.get('exponent', '2'))
 with_attenuation_model_uncertainty = statistics_config.get('attenuation_model_uncertainty', 'false').lower() == 'true'
 with_Ly_break_uncertainty = statistics_config.get('Ly_break_uncertainty', 'false').lower() == 'true'
@@ -311,8 +339,7 @@ latex_table.write(r'  Parameter & Description & Values \\' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  \hline' + "\n")
 latex_table.write(r'  Galaxy components: & & \\' + "\n")
-latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^5$ and $10^{\mathtt{mass\_max}} M_\odot$ \\' + "\n")
-latex_table.write(r'  \texttt{mass\_max} & & %d \\' % (args.mass_max) + "\n")
+latex_table.write(r'  \texttt{stellar\_mass} & & log-uniform between $10^{%d}$ and $10^{%d} M_\odot$ \\' % (mass_min, mass_max) + "\n")
 param_names = []
 is_log_param = []
 print()
@@ -1070,9 +1097,9 @@ def make_prior_transform(rv_redshift, Finfo=None, Linfo=None, num_redshift_point
             return rv.ppf(u)
     else:
         def L_prior_transform(u, z):
-            # AGN luminosity from 10^38 to 10^50
+            # AGN luminosity from 10^L_min to 10^L_max
             del z
-            return u * 12 + 38
+            return u * (L_max - L_min) + L_min
 
     def prior_transform(cube):
         params = np.empty(len(cube) + (1 if redshift_fixed else 0)) + np.nan
@@ -1086,7 +1113,7 @@ def make_prior_transform(rv_redshift, Finfo=None, Linfo=None, num_redshift_point
                     i += 1
 
         # stellar mass from 10^5 to 10^15
-        params[i] = cube[i] * (args.mass_max - 5) + 5
+        params[i] = cube[i] * (mass_max - mass_min) + mass_min
 
         # redshift.
         # Approximate redshift with points on the CDF
@@ -1444,11 +1471,11 @@ class ModelLikelihood(object):
         agn_sed.cache_filters = self.cache_filters
 
         sfr = sed.info['sfh.sfr100Myrs']
-        if sed.info['sfh.age'] > sed.info['universe.age'] or not 0 <= sfr <= args.sfr_max:
+        if sed.info['sfh.age'] > sed.info['universe.age'] or not sfr_min <= sfr <= sfr_max:
             # excluded by exceeding age of Universe
             # assign lower number for those further away from the constraints
             logl = -1e20 * (np.log10(stellar_mass) + abs(sfr) + max(0, sed.info['sfh.age'] - sed.info['universe.age']))
-            #print("violation", (0, sfr, args.sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
+            #print("violation", (sfr_min, sfr, sfr_max), (sed.info['sfh.age'], sed.info['universe.age']), "-->", logl)
             self.last_parameters = parameters
             self.last_loglikelihood = logl
             self.counter_unphysical_reject += 1
@@ -1571,7 +1598,13 @@ def analyse_obs(i, N, samplername, obs, plot=True):
 
     redshift_mean = obs['redshift']
     num_redshift_points = 40
-    if samplername.startswith('nested') and ('redshift_err' not in obs.colnames or 0<=obs['redshift_err']<=0.001):
+
+    if samplername.startswith('nested') and ('flag_zphot' in obs.colnames and obs['flag_zphot']):
+        assert 'ZGRID' in obs.colnames and 'PZ' in obs.colnames
+        rv_redshift = PDFDist(obs['ZGRID'], obs['PZ'])
+        active_param_names = param_names
+        derived_param_names = []
+    elif samplername.startswith('nested') and ('redshift_err' not in obs.colnames or 0<=obs['redshift_err']<=0.001):
         rv_redshift = DeltaDist(redshift_mean)
         active_param_names = param_names[:-1]
         derived_param_names = [param_names[-1]]
@@ -1663,8 +1696,8 @@ def analyse_obs(i, N, samplername, obs, plot=True):
         'A' if with_attenuation_model_uncertainty else '',
         -int(np.log10(systematics_width)),
     )
-    if args.mass_max != 15:
-        outdir += "_maxgal%d" % args.mass_max
+    if mass_max != 15:
+        outdir += "_maxgal%d" % mass_max
 
     replot = (os.environ.get('REPLOT', '0') == '1') or not os.path.exists(outdir + '/analysis_results.txt')
     results = None
@@ -1740,10 +1773,12 @@ def main():
             np.random.shuffle(indices)
         fout = None
         # analyse observations in parallel
+        MP_method = os.environ.get('MP_METHOD', 'forkserver')
         if n_cores == 1:
             # to preserve traceback for debugging run in here
             allresults = (analyse_obs_wrapper((i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
-        elif os.environ.get('MP_METHOD', 'forkserver') == 'joblib':
+        elif MP_method == 'joblib':
+            print(f"Parallelisation with MP_METHOD={MP_method} (if the process is stuck, change MP_METHOD)")
             try:
                 parallel = joblib.Parallel(n_jobs=n_cores, return_generator=True)  # joblib>1.2 will support this
             except TypeError:
@@ -1752,7 +1787,8 @@ def main():
                 joblib.delayed(analyse_obs_wrapper)(
                 (i, len(indices), args.sampler, obs_table_here[i], plot)) for i in indices)
         else:
-            mp_ctx = multiprocessing.get_context(os.environ.get('MP_METHOD', 'forkserver'))
+            print(f"Parallelisation with MP_METHOD={MP_method} (if the process is stuck, change MP_METHOD)")
+            mp_ctx = multiprocessing.get_context(MP_method)
             with mp_ctx.Pool(n_cores, maxtasksperchild=3) as pool:
                 # farm out to process pool
                 allresults = pool.imap_unordered(
