@@ -68,6 +68,7 @@ from ultranest.mlfriends import SimpleRegion, RobustEllipsoidRegion
 from ultranest.plot import PredictionBand
 import ultranest.stepsampler
 import tqdm
+from scipy.interpolate import interp1d
 
 # some helper classes:
 
