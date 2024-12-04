@@ -129,12 +129,12 @@ In the GRAHSP-examples/DR16QWX folder, run::
 Plotting the model
 ------------------
 
-The sampler/ directory contains python scripts that allow plotting the 
+The GRAHSP-examples/ directory contains python scripts that allow plotting the 
 model and its components, and playing with parameter settings.
 
 In particular:
 
- * **plotagn.py**: plots the full GRAHSP model and its components
+ * **plotgagn.py**: plots the full GRAHSP model and its components
 
  * **plotstellarpop.py**: allows you to play with stellar populations
 
