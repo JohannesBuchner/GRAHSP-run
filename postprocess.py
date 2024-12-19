@@ -101,7 +101,7 @@ with Database() as base:
             positions=[wl_eff], widths=0.1 * wl_eff,
             meanline=True, showmeans=True, showcaps=True, showbox=True,
             notch=True, sym='x', vert=True, whis=1.5, 
-            showfliers=True, labels=[filtername], #patch_artist=True,
+            showfliers=True, tick_labels=[filtername], #patch_artist=True,
             capprops=props, boxprops=props, whiskerprops=props,
             flierprops=dict(ms=2, mew=1, mec=color, **props),
             medianprops=dict(ls='-', **props), meanprops=dict(ls=':', **props))
