@@ -52,7 +52,7 @@ for c in inputs.colnames:
     inputs.rename_column(c, c + '_in')
 print("%d inputs" % len(inputs))
 print("reading output ...")
-outputs = astropy.io.ascii.read(data_file + '_analysis_results.txt', format='commented_header')
+outputs = astropy.io.ascii.read(data_file + '_analysis_results.txt', format='commented_header', delimiter="\t")
 if len(outputs) != len(inputs):
     print("WARNING: %d input rows, but %d output rows" % (len(inputs), len(outputs)))
 
