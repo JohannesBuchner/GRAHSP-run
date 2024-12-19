@@ -87,7 +87,7 @@ with Database() as base:
         flux_obs = full[filtername + '_in']
         flux_obs_err = full[filtername + '_err_in']
         if np.any(flux_obs_err > 0):
-            depths.append((filtername, color, wl_eff, np.percentile(flux_obs_err[flux_obs_err>0], 50)))
+            depths.append((filtername, color, wl_eff, np.percentile(np.array(flux_obs_err[flux_obs_err>0]), 50)))
         flux_model = full['totalflux_%s_mean' % filtername]
         with np.errstate(invalid='ignore', divide='ignore'):
             delta = -2.5 * np.log10(flux_obs) - -2.5 * np.log10(flux_model + 1e-10)
