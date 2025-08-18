@@ -67,6 +67,7 @@ Currently, GRAHSP and CIGALE cannot be installed alongside each other.
  * astropy
  * sqlalchemy
  * configobj
+ * h5py
 
 For example::
 
