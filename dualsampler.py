@@ -992,7 +992,7 @@ E$_\mathrm{B-V}^\mathrm{AGN}$=
             # set right hand ticks in mag AB with round numbers
             ABmax = -2.5 * np.log10(ax1.get_ylim()[0] / 3631000)
             ABmin = -2.5 * np.log10(ax1.get_ylim()[1] / 3631000)
-            ytick_ABs = np.arange(int(np.ceil(min(35,ABmin))), int(np.floor(max(10,ABmax))) + 1)
+            ytick_ABs = np.arange(int(np.ceil(min(35,ABmin))), int(np.floor(max(10,min(30,ABmax)))) + 1)
             ytick_fluxes_mJy = 3631000 * 10**(ytick_ABs / -2.5)
             ax_r = ax1.secondary_yaxis('right')
             ax_r.set_ylim(ax1.get_ylim())
@@ -1814,7 +1814,7 @@ def main():
             fout.write(results_string)
             fout.flush()
 
-        print("analying %d observations done." % len(obs_table_here))
+        print("analysing %d observations done." % len(obs_table_here))
 
 
 if __name__ == '__main__':
