@@ -4,31 +4,36 @@ GRAHSP Installation
 Current use policy and the GRAHSP collaboration
 -----------------------------------------------
 
-GRAHSP is a open source code developed with several years of effort.
+GRAHSP is an open source code developed with several years of effort.
 
-In this repository you find how to 
-* access to the GRAHSP code (GRAHSP, GRAHSP-run repositories)
-* access to code documentation and example data sets (GRAHSP-example repository)
-* Resources include scripts and notebooks in GRAHSP-example, and user issues for questions and answers
+In this repository you find how to
 
-*If you would like help applying the code and interpreting the results*:
-join the GRAHSP collaboration by emailing Johannes Buchner <johannes.buchner.acad@gmx.com>. As a collaboration member, you are expected to:
+- access the GRAHSP code (GRAHSP, GRAHSP-run repositories)
+- access code documentation and example data sets (GRAHSP-example repository)
+- resources include scripts and notebooks in GRAHSP-example, and user issues for questions and answers
 
-* help make improvements to the GRAHSP collaboration, such as:
+**If you would like help applying the code and interpreting the results**, you are welcome to
+join the GRAHSP collaboration by emailing Johannes Buchner <johannes.buchner.acad@gmx.com>, and as a community, we will help each other and improve GRAHSP together.
+As a collaboration member, you are expected to:
 
- * opening issues pointing out how to improve the documentation for newcomers (for example you do not understand something while reading a file)
- * help resolve open issues, helping other users
- * sharing code or data sets with other users, such as a jupyter notebook or data set
+- help make improvements to the GRAHSP collaboration, such as:
 
-* offer co-authorship to core GRAHSP developers (Johannes, Mara) and anyone else who helps you with the code during the project
+  - opening issues pointing out how to improve the documentation for newcomers (for example you do not understand something while reading a file)
+  - help resolve open issues, helping other users
+  - sharing code or data sets with other users, such as a Jupyter notebook or data set
 
-As a collaboration member, you are welcome to send questions on our Slack. Ideally, and especially if your questions are generic and may help other users, please open an issue (in GRAHSP-run/ for most issues, in GRAHSP-examples/ for the scripts there and for new example data or notebooks, in GRAHSP/ only for model bugs).
+- offer co-authorship to core GRAHSP developers (Johannes, Mara) and anyone else who helps you with the code during the project
 
-Scientific publications are encouraged to demonstrate the capabilities and benefits of the code
-and to obtain scientific insights.
+As a collaboration member, you are welcome to send questions on our Slack. Ideally, and especially if your questions are generic and may help other users, please open an issue 
+in the relevant repository:
 
+- https://github.com/JohannesBuchner/GRAHSP-run/ for most issues, 
+- https://github.com/JohannesBuchner/GRAHSP-examples/ for the scripts there and for new example data or notebooks, 
+- https://github.com/JohannesBuchner/GRAHSP/ only for model bugs
 
-SED fitting is a subtle endevour where one can make many 
+Scientific publications are encouraged to demonstrate the capabilities and benefits of the code and to obtain scientific insights.
+
+*Beware*: SED fitting is a subtle endevour where one can make many 
 mistakes. When preparing the photometry, watch out for 
 
 * type of magnitude (petrosian, Hall, total/aperture, )
@@ -46,7 +51,7 @@ You may be interested in RainbowLasso as well: https://github.com/JohannesBuchne
 Preliminaries
 ---------------
 
-1. Have a look at the Cigale Documentation. 
+1. Have a look at the `Cigale Documentation <https://cigale.lam.fr/documentation/>`_ and `manual <https://gitlab.lam.fr/cigale/manual/-/jobs/artifacts/master/raw/CIGALE_Manual.pdf?job=build>`_. 
    
 GRAHSP is built on top of CIGALE, so there are many commonalities,
 such as the input data format.
@@ -55,17 +60,17 @@ Currently, GRAHSP and CIGALE cannot be installed alongside each other.
 
 2. Install necessary packages with pip or conda:
 
- * ultranest 
- * getdist
- * tqdm
- * joblib
- * numba
- * matplotlib
- * scipy
- * astropy
- * sqlalchemy
- * configobj
- * h5py
+* ultranest 
+* getdist
+* tqdm
+* joblib
+* numba
+* matplotlib
+* scipy
+* astropy
+* sqlalchemy
+* configobj
+* h5py
 
 For example::
 
@@ -133,14 +138,14 @@ model and its components, and playing with parameter settings.
 
 In particular:
 
- * **plotgagn.py**: plots the full GRAHSP model and its components
+- **plotgagn.py**: plots the full GRAHSP model and its components
 
- * **plotstellarpop.py**: allows you to play with stellar populations
+- **plotstellarpop.py**: allows you to play with stellar populations
 
-   * set the age and tau of the star formation history
-   * compare Maraston2005 and BC03 templates
+  - set the age and tau of the star formation history
+  - compare Maraston2005 and BC03 templates
 
- * **plotattenuation.py**: illustrates the impact of different levels of attenuation
+- **plotattenuation.py**: illustrates the impact of different levels of attenuation
 
 Running GRAHSP
 ---------------
@@ -154,7 +159,7 @@ The fitting is performed with **dualsampler.py**. To understand the interface, r
 * What to do is set by command line options.
 * How to do it (performance settings) is set by environment variables (see below).
 
-In a directory with pcigale.ini file, the following command
+In a directory with pcigale.ini file, the following command::
 
 	$ python3 ../../GRAHSP-run/dualsampler.py analyse --cores=2 --plot
 
@@ -232,7 +237,11 @@ Other scripts
 --------------
 
 Here you can also find:
-* loofilter.py: Create a modified photometry input file, with new rows that leave out one filter at a time.
-  * Usage: python3 loofilter.py input.fits input-new.fits
-* varyz.py: Create a modified photometry input file, with new rows with slightly altered redshifts.
-  * Usage: python3 varyz.py input.fits input-new.fits
+
+- loofilter.py: Create a modified photometry input file, with new rows that leave out one filter at a time.
+
+  - Usage: python3 loofilter.py input.fits input-new.fits
+
+- varyz.py: Create a modified photometry input file, with new rows with slightly altered redshifts.
+
+  - Usage: python3 varyz.py input.fits input-new.fits
