@@ -1,34 +1,32 @@
 GRAHSP Installation
 ===================
 
-Current use policy
---------------------
+Current use policy and the GRAHSP collaboration
+-----------------------------------------------
 
-GRAHSP is a private code developed with several years of effort.
-There will be a public release in the future. 
+GRAHSP is a open source code developed with several years of effort.
 
-That you have received GRAHSP means I trust you to keep the code private
-and respect the policy:
+In this repository you find how to 
+* access to the GRAHSP code (GRAHSP, GRAHSP-run repositories)
+* access to code documentation and example data sets (GRAHSP-example repository)
+* Resources include scripts and notebooks in GRAHSP-example, and user issues for questions and answers
 
-* You will get access to the GRAHSP code (GRAHSP, GRAHSP-run repositories)
-* You will get access to code documentation and example data sets (GRAHSP-example repository)
-* You will get help applying the code and interpreting the results:
-
-  * Resources include scripts and notebooks in GRAHSP-example, and user issues for questions and answers
-  * If your questions are generic and may help other users, please open an issue (in GRAHSP-run/ for most issues, in GRAHSP-examples/ for the scripts there and for new example data or notebooks, in GRAHSP/ only for model bugs)
-
-* Scientific publications are encouraged to demonstrate the capabilities and benefits of the code
-and to obtain scientific insights.
-
-You are expected to
+*If you would like help applying the code and interpreting the results*:
+join the GRAHSP collaboration by emailing Johannes Buchner <johannes.buchner.acad@gmx.com>. As a collaboration member, you are expected to:
 
 * help make improvements to the GRAHSP collaboration, such as:
 
-  * opening issues pointing out how to improve the documentation for newcomers (for example you do not understand something while reading a file)
-  * help resolve open issues, helping other users
-  * sharing code or data sets with other users, such as a jupyter notebook or data set
+ * opening issues pointing out how to improve the documentation for newcomers (for example you do not understand something while reading a file)
+ * help resolve open issues, helping other users
+ * sharing code or data sets with other users, such as a jupyter notebook or data set
 
 * offer co-authorship to core GRAHSP developers (Johannes, Mara) and anyone else who helps you with the code during the project
+
+As a collaboration member, you are welcome to send questions on our Slack. Ideally, and especially if your questions are generic and may help other users, please open an issue (in GRAHSP-run/ for most issues, in GRAHSP-examples/ for the scripts there and for new example data or notebooks, in GRAHSP/ only for model bugs).
+
+Scientific publications are encouraged to demonstrate the capabilities and benefits of the code
+and to obtain scientific insights.
+
 
 SED fitting is a subtle endevour where one can make many 
 mistakes. When preparing the photometry, watch out for 
