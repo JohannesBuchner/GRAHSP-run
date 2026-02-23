@@ -119,6 +119,8 @@ The SPEED environment variable controls how many models to include::
 
 Building the database may fail on NFS-mounted file systems. Use a local file system if this happens.
 
+If you get the error 'ModuleNotFoundError: No module named 'pkg_resources', see `#15<https://github.com/JohannesBuchner/GRAHSP-run/issues/15>`_.
+
 Verifying the installation
 ---------------------------
 
