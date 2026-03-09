@@ -1540,6 +1540,11 @@ def analyse_obs_wrapper(args):
     This allows continuing the run with the next source,
     and later reprocessing the entire sample.
     """
+    # in case of joblib parallelisation, the monkeypatching code at init is not run, and so cosmology may differ.
+    if cosmo_string != 'concordance':
+        if not hasattr(astropy.cosmology, cosmo_string):
+            print("ERROR: cosmology must be set to one of: concordance, " + ', '.join(astropy.cosmology.realizations.available))
+        pcigale.creation_modules.redshifting.cosmology = getattr(astropy.cosmology, cosmo_string)
     i, N, samplername, obs, plot = args
     try:
         return analyse_obs(i, N, samplername, obs, plot=plot)

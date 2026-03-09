@@ -208,7 +208,7 @@ This can be enabled by setting the following environment variables:
 
 * MP_METHOD: This controls how parallelisation is performed, see:
   https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
-  It is 'forkserver' by default, alternatives are 'spawn' and 'fork.
+  It is 'forkserver' by default, alternatives are 'spawn' and 'fork'.
   If set to 'joblib', joblib is used for parallelisation: https://joblib.readthedocs.io/en/latest/parallel.html::
 
 	# run with many cores
