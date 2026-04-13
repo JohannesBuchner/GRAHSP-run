@@ -1799,7 +1799,7 @@ def main():
                 # farm out to process pool
                 allresults = pool.imap_unordered(
                     analyse_obs_wrapper,
-                    ((args.sampler, obs_table_here[i], plot) for i in indices))
+                    ((i, len(indices), args.sampler, obs_table_here[i], plot) for i in indices))
         for id, result, results_string in allresults:
             if results_string is None:
                 print("no result to store for", id, ". Delete plots, otherwise results will not be reanalysed.")
