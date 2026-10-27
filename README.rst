@@ -74,8 +74,7 @@ Currently, GRAHSP and CIGALE cannot be installed alongside each other.
 
 For example::
 
-	conda install -c conda-forge ultranest tqdm joblib numba h5py sqlalchemy matplotlib configobj astropy
-	pip3 install getdist
+	conda install -c conda-forge ultranest tqdm joblib numba h5py sqlalchemy matplotlib configobj astropy getdist
 
 You need about 4 GB of free space in your python site-package directories 
 (usually inside ~/.local or conda folder).
