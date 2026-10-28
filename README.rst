@@ -96,9 +96,9 @@ Installation instructions
 
 4. go into GRAHSP/ folder: "cd GRAHSP"
 
-5. install with conda or pip3::
+5. install with pip3::
 
-	$ SPEED=2 pip3 install -v .
+	$ SPEED=2 pip3 install -v .     # or try: SPEED=2 python -m pip install -v . --no-build-isolation
 	...
 	##############################################################################
 	1- Importing filters...
